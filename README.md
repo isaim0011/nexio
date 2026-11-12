@@ -87,8 +87,9 @@ run unchanged against every backend. They pass on `io_uring`, Linux epoll, Windo
 | Used on | Linux (default) | Windows, macOS, other Unix, and Linux with `--features poll` |
 | Mechanism | completion-based `io_uring`, owned buffers held by the kernel | readiness polling (epoll / kqueue / IOCP via the `polling` crate) with non-blocking `socket2` sockets |
 | TCP, timers, channels, `select`/`join`, `spawn` | yes | yes |
-| UDP | yes | not yet |
-| Async file I/O | yes | not yet |
+| UDP | yes | yes |
+| Async file I/O | yes | yes (runs on a blocking thread pool) |
+| Async host-name resolution | yes (blocking pool) | yes (blocking pool) |
 | `SO_REUSEPORT` sharding with `run_sharded` | yes | Unix only; not available on Windows |
 | Cancellation safety | completion slab, checked by Miri and Kani | nothing is ever handed to the kernel, so dropping a pending future just abandons the wait |
 | Tested | Linux 5.10 / 5.15 / 6.1 / 6.12, soak, fuzz, Miri, Kani | Windows, macOS (CI), Linux epoll; no soak or fuzz run on it yet |
@@ -139,10 +140,10 @@ level; nexio's guarantee is that memory stays valid until the kernel is done wit
 
 ## What is not here (yet)
 
-No TLS, HTTP, DNS (hostname resolution in `bind`/`connect` uses the standard library's blocking
-resolver), Unix-domain sockets, signal handling, or process spawning. No `AsyncRead`/`AsyncWrite`
-compatibility with the tokio ecosystem: the owned-buffer API is different on purpose. UDP and async
-files are missing on the portable backend. See [`ROADMAP.md`](ROADMAP.md).
+Still missing, in the order they are planned (see [`ROADMAP.md`](ROADMAP.md)): Unix-domain sockets,
+signal handling, process spawning, an `AsyncRead`/`AsyncWrite` compatibility layer for the tokio ecosystem
+(the owned-buffer API is different on purpose, so this is an adapter), and TLS and HTTP built on top of that
+adapter with `rustls` and `hyper` rather than written from scratch.
 
 ## Building and testing
 

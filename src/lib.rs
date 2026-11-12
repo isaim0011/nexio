@@ -26,6 +26,9 @@ pub mod buf;
 pub mod executor;
 #[cfg(nexio_uring)]
 pub mod fs;
+#[cfg(nexio_poll)]
+#[path = "poll/fs.rs"]
+pub mod fs;
 #[cfg(nexio_uring)]
 pub mod net;
 #[cfg(nexio_poll)]

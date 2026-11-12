@@ -441,6 +441,18 @@ impl Reactor {
         Ok(key)
     }
 
+    /// Submit a one-shot `POLL_ADD` SQE: completes when `fd` reports any of `events`
+    /// (poll flags such as `POLLIN`). Carries no buffer, so dropping it is trivially safe.
+    pub(crate) fn submit_poll_add(&mut self, fd: RawFd, events: u32) -> io::Result<SlabKey> {
+        let sqe = opcode::PollAdd::new(types::Fd(fd), events).build();
+        let key = self.slab.insert(OpState::Submitted {
+            waker: None,
+            buf: Box::new(slab::PlaceholderBuf),
+        });
+        self.push_sqe(sqe, key)?;
+        Ok(key)
+    }
+
     /// Submit an OpenAt SQE. Holds the CString safely on the heap in the slab.
     pub(crate) fn submit_openat(
         &mut self,
@@ -564,6 +576,18 @@ impl Reactor {
     /// Start an asynchronous timeout operation until absolute `timespec`.
     pub fn timeout_at(&mut self, timespec: types::Timespec) -> io::Result<SimpleOp> {
         let key = self.submit_timeout_at(timespec)?;
+        Ok(SimpleOp::new(key))
+    }
+
+    /// Wait until `fd` is readable (or hung up / in error).
+    pub fn poll_readable(&mut self, fd: RawFd) -> io::Result<SimpleOp> {
+        let key = self.submit_poll_add(fd, libc::POLLIN as u32)?;
+        Ok(SimpleOp::new(key))
+    }
+
+    /// Wait until `fd` is writable (or in error).
+    pub fn poll_writable(&mut self, fd: RawFd) -> io::Result<SimpleOp> {
+        let key = self.submit_poll_add(fd, libc::POLLOUT as u32)?;
         Ok(SimpleOp::new(key))
     }
 

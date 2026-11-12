@@ -3,9 +3,10 @@
 //! elsewhere or with `--features poll`), so passing on both is the evidence that
 //! the two backends behave alike.
 
+use nexio::fs::{File, OpenOptions};
 use nexio::{
     block_on,
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     spawn,
     time::{self, Elapsed},
 };
@@ -266,5 +267,283 @@ fn an_unresolvable_host_is_an_error_not_a_hang() {
     block_on(async {
         let r = TcpStream::connect(("nexio-no-such-host.invalid", 80)).await;
         assert!(r.is_err());
+    });
+}
+
+#[test]
+fn udp_datagrams_roundtrip_and_report_the_sender() {
+    block_on(async {
+        let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let (a_addr, b_addr) = (a.local_addr().unwrap(), b.local_addr().unwrap());
+
+        let (res, _) = a.send_to(b"hello udp".to_vec(), b_addr).await;
+        assert_eq!(res.unwrap(), 9);
+        let (res, buf) = b.recv_from(vec![0u8; 64]).await;
+        let (n, from) = res.unwrap();
+        assert_eq!(&buf[..n], b"hello udp");
+        assert_eq!(from, a_addr);
+
+        // Many datagrams keep their boundaries and (on loopback) their order.
+        for i in 0..100u8 {
+            let (res, _) = a.send_to(pattern(1 + i as usize, i), b_addr).await;
+            res.unwrap();
+        }
+        for i in 0..100u8 {
+            let (res, buf) = b.recv_from(vec![0u8; 2048]).await;
+            let (n, _) = res.unwrap();
+            assert_eq!(buf[..n], pattern(1 + i as usize, i)[..]);
+        }
+    });
+}
+
+#[test]
+fn connected_udp_send_and_recv() {
+    block_on(async {
+        let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
+        assert_eq!(a.peer_addr().unwrap(), b.local_addr().unwrap());
+
+        let (res, _) = a.send(b"ping".to_vec()).await;
+        res.unwrap();
+        let (res, got) = b.recv(vec![0u8; 16]).await;
+        assert_eq!(&got[..res.unwrap()], b"ping");
+    });
+}
+
+#[test]
+fn a_cancelled_udp_receive_does_not_lose_the_next_datagram() {
+    block_on(async {
+        let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b_addr = b.local_addr().unwrap();
+
+        let r = time::timeout(Duration::from_millis(30), b.recv_from(vec![0u8; 64])).await;
+        assert!(
+            r.is_err(),
+            "nothing was sent yet, but the receive finished: {r:?}"
+        );
+
+        let (res, _) = a.send_to(b"after".to_vec(), b_addr).await;
+        res.unwrap();
+        let (res, buf) = b.recv_from(vec![0u8; 64]).await;
+        let (n, _) = res.unwrap();
+        assert_eq!(&buf[..n], b"after");
+    });
+}
+
+#[test]
+fn try_recv_reports_would_block_when_empty() {
+    block_on(async {
+        let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let (res, _) = a.try_recv_from(vec![0u8; 16]);
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    });
+}
+
+fn temp_path(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    std::env::temp_dir().join(format!(
+        "nexio_test_{}_{}_{}.bin",
+        std::process::id(),
+        tag,
+        N.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+#[test]
+fn files_roundtrip_at_scattered_offsets() {
+    let path = temp_path("scatter");
+    block_on(async {
+        let f = File::create(&path).await.unwrap();
+        for (off, seed) in [(0u64, 1u8), (10_000, 2), (100_000, 3), (50_000, 4)] {
+            let (res, _) = f.write_all_at(pattern(5000, seed), off).await;
+            res.unwrap();
+        }
+        f.sync_all().await.unwrap();
+        f.close().await.unwrap();
+
+        let f = File::open(&path).await.unwrap();
+        for (off, seed) in [(100_000u64, 3u8), (10_000, 2), (0, 1), (50_000, 4)] {
+            let (res, got) = f.read_exact_at(vec![0u8; 5000], off).await;
+            res.unwrap();
+            assert_eq!(got, pattern(5000, seed), "at offset {off}");
+        }
+        f.close().await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn reading_past_the_end_reports_eof() {
+    let path = temp_path("eof");
+    std::fs::write(&path, b"0123456789").unwrap();
+    block_on(async {
+        let f = File::open(&path).await.unwrap();
+        let (res, buf) = f.read_at(vec![0u8; 64], 4).await;
+        assert_eq!(&buf[..res.unwrap()], b"456789");
+        let (res, _) = f.read_at(vec![0u8; 8], 10).await;
+        assert_eq!(res.unwrap(), 0, "a read at the end of the file returns 0");
+        let (res, _) = f.read_exact_at(vec![0u8; 20], 0).await;
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn opening_a_missing_file_and_create_new_on_an_existing_one_fail() {
+    let path = temp_path("exists");
+    block_on(async {
+        let missing = temp_path("missing");
+        let err = File::open(&missing).await.err().expect("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+        std::fs::write(&path, b"x").unwrap();
+        let err = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .err()
+            .expect("must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn eight_mebibytes_in_chunks() {
+    let path = temp_path("big");
+    const CHUNK: usize = 256 * 1024;
+    const CHUNKS: usize = 32;
+    block_on(async {
+        let f = File::create(&path).await.unwrap();
+        for i in 0..CHUNKS {
+            let (res, _) = f
+                .write_all_at(pattern(CHUNK, i as u8), (i * CHUNK) as u64)
+                .await;
+            res.unwrap();
+        }
+        f.close().await.unwrap();
+        let f = File::open(&path).await.unwrap();
+        for i in (0..CHUNKS).rev() {
+            let (res, got) = f.read_exact_at(vec![0u8; CHUNK], (i * CHUNK) as u64).await;
+            res.unwrap();
+            assert_eq!(got, pattern(CHUNK, i as u8), "chunk {i}");
+        }
+    });
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        (CHUNK * CHUNKS) as u64
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn fifty_tasks_write_different_regions_concurrently() {
+    let path = temp_path("concurrent");
+    block_on(async {
+        let f = Rc::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .await
+                .unwrap(),
+        );
+        let mut handles = Vec::new();
+        for i in 0..50u8 {
+            let f = f.clone();
+            handles.push(spawn(async move {
+                let (res, _) = f.write_all_at(pattern(4096, i), i as u64 * 4096).await;
+                res.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        for i in 0..50u8 {
+            let (res, got) = f.read_exact_at(vec![0u8; 4096], i as u64 * 4096).await;
+            res.unwrap();
+            assert_eq!(got, pattern(4096, i), "region {i}");
+        }
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn file_work_does_not_stall_timers() {
+    let path = temp_path("stall");
+    block_on(async {
+        let f = Rc::new(File::create(&path).await.unwrap());
+        let writer = {
+            let f = f.clone();
+            spawn(async move {
+                for i in 0..20u8 {
+                    let (res, _) = f.write_all_at(pattern(256 * 1024, i), 0).await;
+                    res.unwrap();
+                    f.sync_data().await.unwrap();
+                }
+            })
+        };
+        let t = std::time::Instant::now();
+        for _ in 0..5 {
+            time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            t.elapsed() < Duration::from_millis(400),
+            "timers stalled: {:?}",
+            t.elapsed()
+        );
+        writer.await.unwrap();
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn udp_recv_from_waits_for_a_datagram_that_arrives_later() {
+    block_on(async {
+        let rx = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let rx_addr = rx.local_addr().unwrap();
+        let sender = spawn(async move {
+            time::sleep(Duration::from_millis(60)).await;
+            let s = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+            let (res, _) = s.send_to(b"late".to_vec(), rx_addr).await;
+            res.unwrap();
+        });
+        // The queue is empty when this starts: it must wait, not fail with WouldBlock.
+        let t = std::time::Instant::now();
+        let (res, buf) = rx.recv_from(vec![0u8; 64]).await;
+        let (n, _) = res.expect("recv_from must wait for data");
+        assert_eq!(&buf[..n], b"late");
+        assert!(
+            t.elapsed() >= Duration::from_millis(40),
+            "returned too early"
+        );
+        sender.await.unwrap();
+    });
+}
+
+#[test]
+fn connected_udp_recv_waits_for_a_datagram_that_arrives_later() {
+    block_on(async {
+        let a = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let b = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        a.connect(b.local_addr().unwrap()).await.unwrap();
+        b.connect(a.local_addr().unwrap()).await.unwrap();
+        let sender = spawn(async move {
+            time::sleep(Duration::from_millis(60)).await;
+            let (res, _) = b.send(b"later".to_vec()).await;
+            res.unwrap();
+        });
+        let (res, buf) = a.recv(vec![0u8; 64]).await;
+        let n = res.expect("recv must wait for data");
+        assert_eq!(&buf[..n], b"later");
+        sender.await.unwrap();
     });
 }

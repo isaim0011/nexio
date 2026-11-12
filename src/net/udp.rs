@@ -202,10 +202,38 @@ impl UdpSocket {
         B: IoBuf + Send + Unpin + 'static,
     {
         let fd = self.fd;
-        crate::reactor::LazyOp::new(buf, move |r, b, w| unsafe {
-            r.submit_send_with_waker(fd, b, Some(w))
-        })
-        .await
+        let mut buf = buf;
+        loop {
+            let (res, b) = crate::reactor::LazyOp::new(buf, move |r, b, w| unsafe {
+                r.submit_send_with_waker(fd, b, Some(w))
+            })
+            .await;
+            buf = b;
+            match res {
+                // A non-blocking socket reports a full send buffer as `WouldBlock`;
+                // an async send waits for room instead of surfacing that.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.wait(true).await {
+                        return (Err(e), buf);
+                    }
+                }
+                other => return (other, buf),
+            }
+        }
+    }
+
+    /// Wait until the socket is ready for reading (or writing), using a one-shot
+    /// `POLL_ADD`. Dropping the future cancels it; it holds no buffer.
+    async fn wait(&self, write: bool) -> io::Result<()> {
+        let op = REACTOR.with(|r| {
+            let mut r = r.borrow_mut();
+            if write {
+                r.poll_writable(self.fd)
+            } else {
+                r.poll_readable(self.fd)
+            }
+        })?;
+        op.await.map(|_| ())
     }
 
     /// Receive a datagram into `buf` via io_uring.
@@ -216,15 +244,29 @@ impl UdpSocket {
         B: IoBufMut + Send + Unpin + 'static,
     {
         let fd = self.fd;
-        let (res, mut buf) = crate::reactor::LazyOp::new(buf, move |r, b, w| unsafe {
-            r.submit_recv_with_waker(fd, b, Some(w))
-        })
-        .await;
-        if let Ok(n) = res {
-            // SAFETY: kernel reported writing n bytes into the buffer.
-            unsafe { buf.set_init(n) };
+        let mut buf = buf;
+        loop {
+            let (res, mut b) = crate::reactor::LazyOp::new(buf, move |r, b, w| unsafe {
+                r.submit_recv_with_waker(fd, b, Some(w))
+            })
+            .await;
+            match res {
+                Ok(n) => {
+                    // SAFETY: kernel reported writing n bytes into the buffer.
+                    unsafe { b.set_init(n) };
+                    return (Ok(n), b);
+                }
+                // The socket is non-blocking, so an empty queue comes back as
+                // `WouldBlock`. An async receive waits for data instead.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    buf = b;
+                    if let Err(e) = self.wait(false).await {
+                        return (Err(e), buf);
+                    }
+                }
+                Err(e) => return (Err(e), b),
+            }
         }
-        (res, buf)
     }
 
     /// Send a datagram from `buf` to `target` asynchronously via io_uring.
@@ -232,14 +274,26 @@ impl UdpSocket {
     where
         B: IoBuf + Send + Unpin + 'static,
     {
-        let key = match REACTOR.with(|r| unsafe {
-            r.borrow_mut()
-                .submit_sendmsg(self.fd, &buf, Some(target), 0)
-        }) {
-            Ok(k) => k,
-            Err(e) => return (Err(e), buf),
-        };
-        unsafe { crate::reactor::Op::new(key, buf) }.await
+        let mut buf = buf;
+        loop {
+            let key = match REACTOR.with(|r| unsafe {
+                r.borrow_mut()
+                    .submit_sendmsg(self.fd, &buf, Some(target), 0)
+            }) {
+                Ok(k) => k,
+                Err(e) => return (Err(e), buf),
+            };
+            let (res, b) = unsafe { crate::reactor::Op::new(key, buf) }.await;
+            buf = b;
+            match res {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.wait(true).await {
+                        return (Err(e), buf);
+                    }
+                }
+                other => return (other, buf),
+            }
+        }
     }
 
     /// Attempt to send a datagram to `target` synchronously without blocking.
@@ -268,7 +322,8 @@ impl UdpSocket {
     /// Receive a datagram into `buf`, returning the number of bytes and source address.
     ///
     /// If the socket is connected to a peer, this reads asynchronously via io_uring
-    /// and associates the peer address. Otherwise, it attempts a non-blocking `recvfrom`.
+    /// and associates the peer address. Otherwise it receives with `recvfrom`, waiting for
+    /// readability (a one-shot `POLL_ADD`) whenever no datagram is queued.
     pub async fn recv_from<B>(&self, buf: B) -> (io::Result<(usize, SocketAddr)>, B)
     where
         B: IoBufMut + Send + Unpin + 'static,
@@ -280,7 +335,21 @@ impl UdpSocket {
                 Err(e) => (Err(e), buf),
             }
         } else {
-            self.try_recv_from(buf)
+            // Unconnected: the sender's address comes from `recvfrom`, so receive with
+            // it and wait for readability whenever the queue is empty.
+            let mut buf = buf;
+            loop {
+                let (res, b) = self.try_recv_from(buf);
+                buf = b;
+                match res {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        if let Err(e) = self.wait(false).await {
+                            return (Err(e), buf);
+                        }
+                    }
+                    other => return (other, buf),
+                }
+            }
         }
     }
 

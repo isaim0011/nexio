@@ -2,10 +2,22 @@
 
 ## Unreleased
 
+### Fixed (affects the published 0.1.0)
+- **`UdpSocket::recv_from` on the io_uring backend did not wait.** On an unconnected socket it made one
+  non-blocking `recvfrom` call and returned `WouldBlock` if no datagram was queued, so
+  `recv_from(buf).await` in a UDP server failed spuriously. The connected `recv`/`send` and `send_to`
+  could surface `WouldBlock` the same way on a full buffer. They now wait (a one-shot `POLL_ADD`, which
+  holds no buffer, so it is trivially cancellation-safe) and retry. Found by running one shared API test
+  file against both backends; regression tests cover data arriving after the receive starts.
+
 - **Portable backend** (epoll / kqueue / IOCP via `polling` and `socket2`) for Windows, macOS and other Unix,
   selected automatically off Linux or with `--features poll` on Linux. Covers TCP, timers and everything in
   the executor; UDP and async file I/O are not implemented on it yet. Same API, verified by a shared test file
   that passes on io_uring, epoll and Windows.
+- `spawn_blocking`: a blocking thread pool whose results are delivered to the requesting reactor thread.
+- `lookup_host` and the `ToAddrs` trait: `bind`/`connect` no longer run the blocking system resolver on the
+  reactor thread; IP literals resolve instantly and only host names use the pool.
+- Portable backend gains `UdpSocket` and async `fs::File` / `OpenOptions` (files run on the blocking pool).
 - Backend selection moved to a build script (`nexio_uring` / `nexio_poll` cfgs).
 - `TcpStream::read_exact` returns `()` instead of the byte count (breaking, matches `File::read_exact_at`).
 - Internal `reactor::op` and `reactor::slab` hidden from the docs and excluded from semver.
