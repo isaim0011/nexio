@@ -21,7 +21,7 @@ so far; see [Backends](#backends) for exactly what each one has.
 
 ```toml
 [dependencies]
-nexio = { git = "https://github.com/isaim0011/nexio" }
+nexio = "0.2"
 ```
 
 ```rust

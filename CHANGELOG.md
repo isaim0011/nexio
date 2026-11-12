@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-11-13
 
 ### Added
 - `compat` (feature `tokio-compat`): tokio `AsyncRead`/`AsyncWrite` adapter for nexio streams.
