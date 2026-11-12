@@ -49,7 +49,7 @@ impl Mailbox {
         }
     }
 
-    fn complete(&self, id: u64) {
+    pub(crate) fn complete(&self, id: u64) {
         self.done.lock().unwrap_or_else(|e| e.into_inner()).push(id);
         (self.notify)();
     }
@@ -78,8 +78,28 @@ pub(crate) fn deliver(ids: Vec<u64>) -> usize {
     n
 }
 
+/// A process-unique id for something that will be completed from another thread.
+pub(crate) fn next_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Remember `waker` for `id`; `deliver` wakes it when that id is completed.
+pub(crate) fn register_waker(id: u64, waker: &Waker) {
+    WAKERS.with(|w| w.borrow_mut().insert(id, waker.clone()));
+}
+
+/// Forget the waker for `id`.
+pub(crate) fn unregister_waker(id: u64) {
+    let _ = WAKERS.try_with(|w| {
+        if let Ok(mut w) = w.try_borrow_mut() {
+            w.remove(&id);
+        }
+    });
+}
+
 #[cfg(nexio_poll)]
-fn current_mailbox() -> Arc<Mailbox> {
+pub(crate) fn current_mailbox() -> Arc<Mailbox> {
     crate::reactor::REACTOR.with(|r| r.borrow().mailbox())
 }
 
@@ -93,7 +113,7 @@ struct UringMailbox {
 }
 
 #[cfg(nexio_uring)]
-fn current_mailbox() -> Arc<Mailbox> {
+pub(crate) fn current_mailbox() -> Arc<Mailbox> {
     thread_local! {
         static MAILBOX: RefCell<Option<UringMailbox>> = const { RefCell::new(None) };
     }
@@ -257,6 +277,12 @@ impl Pool {
     }
 }
 
+/// Run `f` on a pool thread with no result and no reactor involvement. For cleanup that
+/// must happen even when no `block_on` is running, such as reaping a child process.
+pub(crate) fn run_detached(f: impl FnOnce() + Send + 'static) {
+    pool().submit(Box::new(f));
+}
+
 // ── the public future ────────────────────────────────────────────────────────
 
 struct Shared<T> {
@@ -321,8 +347,7 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let id = next_id();
     let shared = Arc::new(Shared {
         result: Mutex::new(None),
     });

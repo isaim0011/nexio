@@ -172,6 +172,7 @@ Done:
       one socket, refused connect, EOF, cancelled read and accept, 200 concurrent clients, timer ordering.
       Passes on io_uring, Linux epoll and Windows
 - [x] `spawn_blocking` pool, async host-name resolution, portable `UdpSocket` and async `File`
+- [x] Unix-domain sockets, signals, child processes (all on both backends)
 - [x] CI matrix: Windows, macOS, Linux epoll; all green on first run (macOS: 42 unit + 9 API tests and clippy)
 
 Open, in priority order:

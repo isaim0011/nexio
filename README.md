@@ -90,6 +90,8 @@ run unchanged against every backend. They pass on `io_uring`, Linux epoll, Windo
 | UDP | yes | yes |
 | Async file I/O | yes | yes (runs on a blocking thread pool) |
 | Unix-domain sockets | yes (Unix) | yes (Unix) |
+| Signals (`ctrl_c`, Unix `signal`) | yes | yes |
+| Child processes | yes | yes |
 | Async host-name resolution | yes (blocking pool) | yes (blocking pool) |
 | `SO_REUSEPORT` sharding with `run_sharded` | yes | Unix only; not available on Windows |
 | Cancellation safety | completion slab, checked by Miri and Kani | nothing is ever handed to the kernel, so dropping a pending future just abandons the wait |

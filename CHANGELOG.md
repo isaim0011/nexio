@@ -16,6 +16,10 @@
   that passes on io_uring, epoll and Windows.
 - Unix-domain sockets (`UnixListener`, `UnixStream`, `UnixDatagram`) on Unix, one implementation shared by both
   backends; writing to a closed peer returns `BrokenPipe` instead of raising `SIGPIPE`.
+- `nexio::signal`: `ctrl_c()` everywhere and `signal(kind)` on Unix, delivered across any number of reactor
+  threads. Signals coalesce, like the OS. Forbidden signals return an error instead of panicking.
+- `nexio::process`: `Command`/`Child` with async `wait`, `output`, and piped stdin/stdout/stderr. Pipes never
+  lose data when an operation is cancelled, output is bounded to 1 MiB per pipe, dropped children are reaped.
 - `spawn_blocking`: a blocking thread pool whose results are delivered to the requesting reactor thread.
 - `lookup_host` and the `ToAddrs` trait: `bind`/`connect` no longer run the blocking system resolver on the
   reactor thread; IP literals resolve instantly and only host names use the pool.

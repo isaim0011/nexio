@@ -29,6 +29,12 @@ pin-project-lite = "0.2"
 polling  = { version = "3", optional = true }
 socket2  = { version = "0.5", features = ["all"] }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook-registry = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.6"
 
