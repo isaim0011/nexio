@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 ulimit -n 65535 2>/dev/null || true
 
-cargo build --release --bench echo >/dev/null 2>&1
+cargo build --release --bench echo ${FEATURES:+--features $FEATURES} >/dev/null 2>&1
 BIN="$(ls -t target/release/deps/echo-* 2>/dev/null | grep -v '\.d$' | head -1)"
 TICKS="$(getconf CLK_TCK)"
 

@@ -9,9 +9,10 @@ repository = "https://github.com/isaim0011/nexio"
 
 [features]
 default = []
-# Enable coop/defer taskrun flags (kernel 6.1+). Off by default so v0
-# can run on older kernels; flip on once we have benchmark evidence.
-coop-taskrun = []
+# COOP_TASKRUN / DEFER_TASKRUN / SINGLE_ISSUER are ON by default (kernel 6.1+;
+# the reactor falls back to a plain ring on older kernels). Enable this feature
+# to turn them off, e.g. to A/B them in benchmarks.
+no-coop-taskrun = []
 
 [dependencies]
 io-uring = "0.6"

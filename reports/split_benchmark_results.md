@@ -193,3 +193,29 @@ isolated yet: the kernel client is the bottleneck (about 1.5 s of client CPU per
 batch of replies costs a `sendto` kick, and on veth the kick also runs the peer's receive path on the
 server's core; and each 128 B echo is a tiny batch, so per-batch overhead dominates. A real NIC with
 native XDP and zero-copy, and a bypass client, could change this either way; neither is available here.
+
+## nexio verification re-check and COOP/DEFER_TASKRUN A/B
+
+**Verification claims re-run independently on the VPS:** 76 tests pass (`cargo test --release`), all 9
+Kani harnesses verify (`cargo kani --tests`, 0 failures), and Miri passes `slab_invariants` (5 tests)
+and the `slab_*` tests in `cancel_on_drop` (4 tests) with `-Zmiri-strict-provenance
+-Zmiri-symbolic-alignment-check`. Miri covers only the pure-Rust slab layer, as its script says; it
+cannot execute io_uring syscalls.
+
+**A feature-flag bug found and fixed.** `Cargo.toml` declared a `coop-taskrun` feature (documented as
+off by default) that nothing used, while the reactor checked an undeclared `no-coop-taskrun` feature.
+Net effect: `COOP_TASKRUN`, `DEFER_TASKRUN` and `SINGLE_ISSUER` were always on and could not be turned
+off. The declaration now matches the code (`no-coop-taskrun` turns them off), and `bench/split.sh`
+accepts `FEATURES=...`.
+
+**Measured effect** (nexio TCP echo, server core 0, client core 1, 100 connections x 2,000 messages of
+128 B, 5 interleaved runs each, kernel client):
+
+| Setting | Throughput (msg/s) | Server CPU per message |
+|:---|---:|---:|
+| flags ON (default) | 95,600-97,600 (mean ~96,700) | 6.55-6.75 us |
+| flags OFF (`no-coop-taskrun`) | 89,900-93,000 (mean ~92,100) | 6.65-6.90 us |
+
+About +5% throughput and ~2% less server CPU with the flags on; the throughput ranges do not overlap.
+Throughput is still partly client-limited, so the CPU column is the more reliable one, and its gap is
+small. Keeping the flags on by default is supported by this data.
