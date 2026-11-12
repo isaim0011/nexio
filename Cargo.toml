@@ -56,3 +56,7 @@ harness = false
 [[bench]]
 name = "zc"
 harness = false
+
+[[bench]]
+name = "fanout"
+harness = false

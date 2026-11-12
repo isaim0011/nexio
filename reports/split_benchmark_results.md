@@ -97,3 +97,19 @@ host cannot show the benefit a real NIC might give; queue depth 1 serializes on 
 buffer-release notification CQE, so deeper pipelining could narrow the throughput gap. Supporting
 SendZc in nexio would also require changes to the verified completion slab (two CQEs per send).
 Not worth doing on this evidence.
+
+## Fan-out: one payload to N sockets (`benches/fanout.rs`, standalone)
+
+The core operation of a rooms/pub-sub server. 1,000 loopback connections, 300 rounds (300,000
+deliveries), publisher on core 0, a single epoll receiver thread on core 1, 3 runs each.
+`sync` is N blocking `send(2)` calls per round; `uring` queues N Send SQEs and issues one
+`io_uring_enter` per round.
+
+| Message size | sync CPU per delivery | uring CPU per delivery | Saving |
+|---:|---:|---:|---:|
+| 128 B | 4.51-4.58 us | 4.03-4.11 us | ~10-12% |
+| 1 KB | 4.55-4.75 us | 4.04-4.31 us | ~5-15% |
+
+Batching all N sends into one syscall saves roughly 10%. The remaining ~4 us per delivery is the
+kernel TCP send path, which no submission strategy removes. Deliveries per second were bounded by
+the single receiver core (~125-135k/s), so CPU per delivery is the metric to read, not throughput.
