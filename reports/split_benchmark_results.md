@@ -163,3 +163,33 @@ this project that clears 2x, and it only does so under these conditions:
   zero-copy mode would behave differently in either direction;
 - the receiver busy-polls a full core, the kernel receiver does not, so this trades a core for rate;
 - the XDP attach mode (native vs generic) was not recorded.
+
+## User-space TCP over AF_XDP (`utcp/`, experimental)
+
+A small TCP server stack (`utcp/src/lib.rs`, pure protocol logic, 11 unit tests) plus an AF_XDP I/O
+loop (`utcp/src/bin/utcp_xdp.rs`). It implements IPv4, ARP replies, the passive-open handshake,
+in-order delivery, cumulative ACKs, sequence-number wraparound, a retransmission timer with
+exponential backoff, passive close, and RST for unknown flows. It does **not** implement congestion
+control, out-of-order buffering, window scaling or SACK, peer MSS, zero-window probing, delayed ACKs,
+TIME_WAIT, fragment reassembly, IPv6, active open, or any SYN-flood defense, and its initial sequence
+numbers are predictable. It is a measurement vehicle, not a general-purpose TCP.
+
+**Correctness against real Linux TCP.** A kernel TCP client connects through the veth pair (ARP
+resolved dynamically, so the stack's ARP reply path is exercised): 1 conn x 50, 4 x 200, and 4 x 100
+messages of 3,000 bytes (multi-segment). 0 mismatches in every run, every connection closed cleanly,
+0 transmit drops. Under load, 600,000 verified echoes with 0 mismatches.
+
+**Speed against nexio** (same kernel client on core 1, server on core 0, veth with checksum and
+segmentation offloads off, 100 connections x 2,000 messages of 128 B, 3 runs each):
+
+| Server | Client-measured msgs/s | Server CPU per message |
+|:---|---:|---:|
+| nexio (kernel TCP, io_uring) | 100,000-100,600 | 5.90 us (93% of it kernel time) |
+| utcp over AF_XDP | 113,100-114,000 | 6.4-6.6 us (busy time; the loop spins when idle) |
+
+The user-space stack gives about 13% more end-to-end throughput and is **not** cheaper per message.
+The 3.4x raw packet-rate result above does not carry over to TCP echo here. Likely reasons, not
+isolated yet: the kernel client is the bottleneck (about 1.5 s of client CPU per 1.75-2.0 s run); each
+batch of replies costs a `sendto` kick, and on veth the kick also runs the peer's receive path on the
+server's core; and each 128 B echo is a tiny batch, so per-batch overhead dominates. A real NIC with
+native XDP and zero-copy, and a bypass client, could change this either way; neither is available here.

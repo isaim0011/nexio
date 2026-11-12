@@ -1,0 +1,18 @@
+[package]
+name = "utcp"
+version = "0.0.1"
+edition = "2021"
+description = "Experimental minimal user-space TCP server stack for AF_XDP. Not a general-purpose TCP: see the crate docs for what is missing."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "net", "io-util", "sync", "macros"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nexio = { path = ".." }
+
+[[bin]]
+name = "utcp_xdp"
+path = "src/bin/utcp_xdp.rs"
