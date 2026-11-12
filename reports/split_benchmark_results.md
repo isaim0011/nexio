@@ -43,9 +43,12 @@ total would need the kernel to do half the work, which no runtime controls.
 
 - Versus tokio, nexio is about 9.8x on random reads and 4.9x on 64K sequential reads. That is the
   known cost of tokio doing file I/O through a blocking thread pool, not a nexio-specific win.
-- Versus compio and monoio, nexio is level on random reads and writes, and 16-19% slower on 64K
-  sequential reads. That gap is the concrete optimization target.
-- Runs are short (a few ms for the read workloads), so treat differences under about 5% as noise.
+- Versus compio and monoio, nexio is level on every workload. An earlier single run showed nexio
+  16-19% behind on 64K sequential reads; six repeat runs showed that was noise. Range over six
+  runs, in IOPS: nexio 131k-194k (mean ~166k), compio 130k-181k (mean ~162k), monoio 132k-191k
+  (mean ~175k). The ranges overlap almost completely, so there is nothing to optimize there.
+- Each read workload lasts only a few milliseconds, so a single run cannot resolve differences
+  under roughly 30%. Compare means over repeated runs, not one table.
 
 ## Correction to the earlier report
 
