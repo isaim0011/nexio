@@ -141,3 +141,25 @@ Limits, stated plainly:
   (native vs generic) was not recorded.
 - The AF_XDP receiver busy-polls, so its CPU time (~100% of a core) is not comparable to the blocking
   kernel receiver (~58% of a core); the packets-per-second figure is the comparable number.
+
+### Bypass on both sides (AF_XDP sender into AF_XDP receiver)
+
+Added `send-xsk`: crafted Ethernet + IPv4 + UDP frames (UDP checksum 0) written straight into an
+AF_XDP TX ring on `va`, one `sendto` kick per batch of up to 64, so the kernel UDP stack is not used
+on either side. Same veth pair, same cores, same 64-byte payloads, kernel baseline re-run in the same
+session. Three runs each.
+
+| Path | Delivered packets/s | Loss |
+|:---|---:|:---|
+| Kernel UDP -> kernel UDP | 176,300-176,600 | none |
+| Kernel UDP -> AF_XDP (above) | 261,400-263,500 | none |
+| **AF_XDP -> AF_XDP** | **603,100-611,500** | ~0 (delivered within ~100 of sent per 3M) |
+
+Bypassing both sides is about 3.4x the kernel path on raw packet rate. This is the first result in
+this project that clears 2x, and it only does so under these conditions:
+- raw 64-byte UDP frames, not TCP and not WebSocket; there is no connection state, retransmission,
+  or flow control in this test, and a real server would need a user-space TCP stack to use any of it;
+- veth between two namespaces on one 2-vCPU host in copy mode, not a real NIC; real hardware in
+  zero-copy mode would behave differently in either direction;
+- the receiver busy-polls a full core, the kernel receiver does not, so this trades a core for rate;
+- the XDP attach mode (native vs generic) was not recorded.

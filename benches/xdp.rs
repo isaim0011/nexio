@@ -367,9 +367,159 @@ fn recv_xsk(ifname: &str) {
     }
 }
 
+const XDP_TX_RING: i32 = 3;
+
+fn ip_checksum(h: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    for c in h.chunks(2) {
+        sum += u16::from_be_bytes([c[0], c[1]]) as u32;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Ethernet + IPv4 + UDP frame (UDP checksum 0, legal for IPv4) carrying
+/// `PAYLOAD` bytes, 10.9.0.1:12345 -> 10.9.0.2:9000, between the fixed MACs
+/// the benchmark script assigns to the veth pair.
+fn build_frame() -> Vec<u8> {
+    let mut f = Vec::with_capacity(14 + 20 + 8 + PAYLOAD);
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x02]); // dst MAC (vb)
+    f.extend_from_slice(&[0x02, 0, 0, 0, 0, 0x01]); // src MAC (va)
+    f.extend_from_slice(&0x0800u16.to_be_bytes());
+    let mut ip = vec![0x45, 0];
+    ip.extend_from_slice(&((20 + 8 + PAYLOAD) as u16).to_be_bytes());
+    ip.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    ip.extend_from_slice(&[10, 9, 0, 1]);
+    ip.extend_from_slice(&[10, 9, 0, 2]);
+    let c = ip_checksum(&ip);
+    ip[10..12].copy_from_slice(&c.to_be_bytes());
+    f.extend_from_slice(&ip);
+    f.extend_from_slice(&12345u16.to_be_bytes());
+    f.extend_from_slice(&PORT_DEFAULT.to_be_bytes());
+    f.extend_from_slice(&((8 + PAYLOAD) as u16).to_be_bytes());
+    f.extend_from_slice(&[0, 0]);
+    f.extend(std::iter::repeat(0x37u8).take(PAYLOAD));
+    f
+}
+
+/// AF_XDP transmit: every UMEM frame holds the same packet, so frames can be
+/// re-queued as soon as their completion is reaped, and nothing needs the
+/// kernel UDP stack on the sending side.
+fn send_xsk(ifname: &str, secs: u64) {
+    unsafe {
+        let cname = CString::new(ifname).unwrap();
+        let ifindex = libc::if_nametoindex(cname.as_ptr());
+        if ifindex == 0 {
+            die("if_nametoindex");
+        }
+        let umem = libc::mmap(
+            std::ptr::null_mut(),
+            FRAMES * CHUNK,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        if umem == libc::MAP_FAILED {
+            die("mmap umem");
+        }
+        let frame = build_frame();
+        for i in 0..FRAMES {
+            std::ptr::copy_nonoverlapping(frame.as_ptr(), (umem as *mut u8).add(i * CHUNK), frame.len());
+        }
+        let xsk = libc::socket(AF_XDP, libc::SOCK_RAW, 0);
+        if xsk < 0 {
+            die("socket(AF_XDP)");
+        }
+        let mut reg = [0u64; 3];
+        reg[0] = umem as u64;
+        reg[1] = (FRAMES * CHUNK) as u64;
+        reg[2] = CHUNK as u64;
+        if libc::setsockopt(xsk, SOL_XDP, XDP_UMEM_REG, reg.as_ptr() as *const _, 24) < 0 {
+            die("XDP_UMEM_REG");
+        }
+        let n: i32 = RING as i32;
+        for opt in [XDP_UMEM_FILL_RING, XDP_UMEM_COMPLETION_RING, XDP_TX_RING] {
+            if libc::setsockopt(xsk, SOL_XDP, opt, &n as *const _ as *const _, 4) < 0 {
+                die("ring size setsockopt");
+            }
+        }
+        let mut off = MmapOffsets::default();
+        let mut len = std::mem::size_of::<MmapOffsets>() as u32;
+        if libc::getsockopt(xsk, SOL_XDP, XDP_MMAP_OFFSETS, &mut off as *mut _ as *mut _, &mut len) < 0 {
+            die("XDP_MMAP_OFFSETS");
+        }
+        let tx_map = libc::mmap(
+            std::ptr::null_mut(),
+            off.tx.desc as usize + RING * 16,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_POPULATE,
+            xsk,
+            0x8000_0000i64,
+        );
+        let cr_map = libc::mmap(
+            std::ptr::null_mut(),
+            off.cr.desc as usize + RING * 8,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_POPULATE,
+            xsk,
+            0x1_8000_0000i64,
+        );
+        if tx_map == libc::MAP_FAILED || cr_map == libc::MAP_FAILED {
+            die("mmap tx/completion rings");
+        }
+        let mut sa = [0u8; 16];
+        sa[0..2].copy_from_slice(&(AF_XDP as u16).to_ne_bytes());
+        sa[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+        if libc::bind(xsk, sa.as_ptr() as *const _, 16) < 0 {
+            die("bind AF_XDP (tx)");
+        }
+
+        let tp = &*((tx_map as *mut u8).add(off.tx.producer as usize) as *const AtomicU32);
+        let tc = &*((tx_map as *mut u8).add(off.tx.consumer as usize) as *const AtomicU32);
+        let tx_desc = (tx_map as *mut u8).add(off.tx.desc as usize) as *mut [u64; 2];
+        let cp = &*((cr_map as *mut u8).add(off.cr.producer as usize) as *const AtomicU32);
+        let cc = &*((cr_map as *mut u8).add(off.cr.consumer as usize) as *const AtomicU32);
+
+        let end = Instant::now() + Duration::from_secs(secs);
+        let mut prod = 0u32;
+        let mut next_frame = 0usize;
+        let mut kicks = 0u64;
+        let cpu0 = thread_cpu();
+        while Instant::now() < end {
+            let cons = tc.load(Ordering::Acquire);
+            let free = RING as u32 - prod.wrapping_sub(cons);
+            let batch = free.min(64);
+            for _ in 0..batch {
+                *tx_desc.add((prod as usize) & (RING - 1)) = [(next_frame * CHUNK) as u64, frame.len() as u64];
+                next_frame = (next_frame + 1) % FRAMES;
+                prod = prod.wrapping_add(1);
+            }
+            tp.store(prod, Ordering::Release);
+            libc::sendto(xsk, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null(), 0);
+            kicks += 1;
+            // reap completions so the kernel can keep reserving completion slots
+            cc.store(cp.load(Ordering::Acquire), Ordering::Release);
+        }
+        let done = tc.load(Ordering::Acquire) as u64;
+        let cpu = thread_cpu() - cpu0;
+        println!(
+            "sent={done} pps={:.0} kicks={kicks} sender_thread_cpu_s={:.2}",
+            done as f64 / secs as f64,
+            cpu.as_secs_f64()
+        );
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     match a.get(1).map(String::as_str) {
+        Some("send-xsk") => {
+            pin(1);
+            send_xsk(a.get(2).map(String::as_str).unwrap_or("va"), a.get(3).and_then(|s| s.parse().ok()).unwrap_or(5));
+        }
         Some("send") => {
             pin(1);
             send(&a[2], a[3].parse().unwrap_or(PORT_DEFAULT), a[4].parse().unwrap_or(5));
