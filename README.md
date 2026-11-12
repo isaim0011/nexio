@@ -89,6 +89,7 @@ run unchanged against every backend. They pass on `io_uring`, Linux epoll, Windo
 | TCP, timers, channels, `select`/`join`, `spawn` | yes | yes |
 | UDP | yes | yes |
 | Async file I/O | yes | yes (runs on a blocking thread pool) |
+| Unix-domain sockets | yes (Unix) | yes (Unix) |
 | Async host-name resolution | yes (blocking pool) | yes (blocking pool) |
 | `SO_REUSEPORT` sharding with `run_sharded` | yes | Unix only; not available on Windows |
 | Cancellation safety | completion slab, checked by Miri and Kani | nothing is ever handed to the kernel, so dropping a pending future just abandons the wait |
@@ -140,8 +141,7 @@ level; nexio's guarantee is that memory stays valid until the kernel is done wit
 
 ## What is not here (yet)
 
-Still missing, in the order they are planned (see [`ROADMAP.md`](ROADMAP.md)): Unix-domain sockets,
-signal handling, process spawning, an `AsyncRead`/`AsyncWrite` compatibility layer for the tokio ecosystem
+Still missing, in the order they are planned (see [`ROADMAP.md`](ROADMAP.md)): signal handling, process spawning, an `AsyncRead`/`AsyncWrite` compatibility layer for the tokio ecosystem
 (the owned-buffer API is different on purpose, so this is an adapter), and TLS and HTTP built on top of that
 adapter with `rustls` and `hyper` rather than written from scratch.
 

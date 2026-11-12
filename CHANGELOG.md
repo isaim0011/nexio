@@ -14,6 +14,8 @@
   selected automatically off Linux or with `--features poll` on Linux. Covers TCP, timers and everything in
   the executor; UDP and async file I/O are not implemented on it yet. Same API, verified by a shared test file
   that passes on io_uring, epoll and Windows.
+- Unix-domain sockets (`UnixListener`, `UnixStream`, `UnixDatagram`) on Unix, one implementation shared by both
+  backends; writing to a closed peer returns `BrokenPipe` instead of raising `SIGPIPE`.
 - `spawn_blocking`: a blocking thread pool whose results are delivered to the requesting reactor thread.
 - `lookup_host` and the `ToAddrs` trait: `bind`/`connect` no longer run the blocking system resolver on the
   reactor thread; IP literals resolve instantly and only host names use the pool.

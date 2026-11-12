@@ -4,6 +4,11 @@
 
 pub mod udp;
 pub use udp::UdpSocket;
+#[cfg(unix)]
+#[path = "../unix.rs"]
+pub mod unix;
+#[cfg(unix)]
+pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
 pub use crate::addr::{lookup_host, ToAddrs};
 use std::{

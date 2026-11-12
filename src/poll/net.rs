@@ -10,7 +10,7 @@
 //!   pool (see [`lookup_host`]), never on the reactor thread.
 //! * `SO_REUSEPORT` is set where it exists (Unix other than Solaris/illumos);
 //!   `SO_REUSEADDR` only on Unix, because on Windows it permits port hijacking.
-//! * Async file I/O is not implemented on this backend yet.
+//! * Async files run on the blocking pool (see the `fs` module).
 
 use std::{
     io,
@@ -23,10 +23,15 @@ pub use crate::addr::{lookup_host, ToAddrs};
 mod sock;
 mod udp;
 #[cfg(unix)]
+#[path = "../unix.rs"]
+pub mod unix;
+#[cfg(unix)]
 use sock::raw;
 use sock::{is_in_progress, socket_addr, Io};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 pub use udp::UdpSocket;
+#[cfg(unix)]
+pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
 use crate::buf::{BufResult, IoBuf, IoBufMut};
 
