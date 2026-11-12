@@ -1,6 +1,7 @@
 # nexio
 
-A thread-per-core async runtime for Linux, built directly on `io_uring`.
+A thread-per-core async runtime with owned-buffer I/O: `io_uring` on Linux, and a portable
+epoll / kqueue / IOCP backend everywhere else.
 
 - **Owned-buffer I/O.** You hand a buffer to an operation and get it back with the result, so the
   kernel never writes into memory Rust thinks it still owns.
@@ -12,7 +13,9 @@ A thread-per-core async runtime for Linux, built directly on `io_uring`.
   `SO_REUSEPORT`.
 - **Small surface:** TCP, UDP, files, timers, channels, `select`/`join`, `JoinSet`.
 
-**Status: 0.1, pre-release.** It works and is tested, but the API may still change. It is Linux-only.
+**Status: pre-release.** The `io_uring` backend (Linux) is the verified one, published as 0.1. The portable
+backend (Windows, macOS, other Unix, and Linux with `--features poll`) is new and covers TCP and timers
+so far; see [Backends](#backends) for exactly what each one has.
 
 ## Quick start
 
@@ -72,7 +75,28 @@ Each shard gets its own io_uring and its own executor, pinned to its own CPU. `T
   version in between; mainline 5.11 to 5.14 and other distributions' kernels have not been run.
 - Some container runtimes block `io_uring` with seccomp; if ring setup fails, that is why.
 - Declared MSRV is Rust 1.75; it has only been built and tested on current stable.
-- Other operating systems fail to compile with an explicit error. There is no fallback backend yet.
+- Any other target uses the portable backend automatically (see below).
+
+## Backends
+
+The backend is chosen at build time. The public API is the same; the 9 tests in `tests/portable_api.rs`
+run unchanged against every backend. They pass on `io_uring`, on Linux epoll and on Windows; macOS
+is exercised by CI.
+
+| | `io_uring` backend | Portable backend |
+|:---|:---|:---|
+| Used on | Linux (default) | Windows, macOS, other Unix, and Linux with `--features poll` |
+| Mechanism | completion-based `io_uring`, owned buffers held by the kernel | readiness polling (epoll / kqueue / IOCP via the `polling` crate) with non-blocking `socket2` sockets |
+| TCP, timers, channels, `select`/`join`, `spawn` | yes | yes |
+| UDP | yes | not yet |
+| Async file I/O | yes | not yet |
+| `SO_REUSEPORT` sharding with `run_sharded` | yes | Unix only; not available on Windows |
+| Cancellation safety | completion slab, checked by Miri and Kani | nothing is ever handed to the kernel, so dropping a pending future just abandons the wait |
+| Tested | Linux 5.10 / 5.15 / 6.1 / 6.12, soak, fuzz, Miri, Kani | Windows (local), Linux epoll (VPS); macOS in CI |
+
+The portable backend gives you the same API on every platform, not `io_uring`'s speed: it is an ordinary
+readiness reactor. Use `--features poll` on Linux if `io_uring` is blocked (some container runtimes
+disable it).
 
 ## Performance, honestly
 
@@ -118,13 +142,14 @@ level; nexio's guarantee is that memory stays valid until the kernel is done wit
 
 No TLS, HTTP, DNS (hostname resolution in `bind`/`connect` uses the standard library's blocking
 resolver), Unix-domain sockets, signal handling, or process spawning. No `AsyncRead`/`AsyncWrite`
-compatibility with the tokio ecosystem: the owned-buffer API is different on purpose. No Windows or
-macOS backend. See [`ROADMAP.md`](ROADMAP.md).
+compatibility with the tokio ecosystem: the owned-buffer API is different on purpose. UDP and async
+files are missing on the portable backend. See [`ROADMAP.md`](ROADMAP.md).
 
 ## Building and testing
 
 ```bash
-cargo test                       # Linux only
+cargo test                       # any OS; Linux uses io_uring, others the portable backend
+cargo test --features poll       # force the portable backend on Linux
 cargo kani --tests               # needs the Kani toolchain
 bash scripts/ci_miri.sh          # needs nightly + Miri
 cargo +nightly fuzz run slab_ops # needs cargo-fuzz

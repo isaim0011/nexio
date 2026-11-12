@@ -1,4 +1,5 @@
-//! Asynchronous time utilities backed by `io_uring` timeouts.
+//! Asynchronous time utilities: `io_uring` timeouts on the io_uring backend, the
+//! reactor's timer map on the portable backend.
 
 use std::{fmt, future::Future, time::Duration};
 
@@ -22,6 +23,7 @@ impl std::error::Error for Elapsed {}
 /// Sleep for at least `duration` using `io_uring` `IORING_OP_TIMEOUT`.
 ///
 /// Dropping the returned future cancels the pending kernel timeout cleanly.
+#[cfg(nexio_uring)]
 pub async fn sleep(duration: Duration) {
     if duration.is_zero() {
         crate::executor::yield_now().await;
@@ -29,6 +31,69 @@ pub async fn sleep(duration: Duration) {
     }
     if let Ok(op) = REACTOR.with(|r| r.borrow_mut().sleep(duration)) {
         let _ = op.await;
+    }
+}
+
+/// Sleep for at least `duration` using the reactor's timer map.
+///
+/// Dropping the returned future cancels the timer.
+#[cfg(nexio_poll)]
+pub async fn sleep(duration: Duration) {
+    if duration.is_zero() {
+        crate::executor::yield_now().await;
+        return;
+    }
+    Sleep {
+        deadline: std::time::Instant::now() + duration,
+        handle: None,
+    }
+    .await
+}
+
+#[cfg(nexio_poll)]
+struct Sleep {
+    deadline: std::time::Instant,
+    handle: Option<(std::time::Instant, u64)>,
+}
+
+#[cfg(nexio_poll)]
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if std::time::Instant::now() >= self.deadline {
+            return std::task::Poll::Ready(());
+        }
+        let (deadline, waker) = (self.deadline, cx.waker().clone());
+        let existing = self.handle;
+        let handle = REACTOR.with(|r| {
+            let mut r = r.borrow_mut();
+            match existing {
+                Some(h) => {
+                    r.update_timer(h, waker);
+                    h
+                }
+                None => r.add_timer(deadline, waker),
+            }
+        });
+        self.handle = Some(handle);
+        std::task::Poll::Pending
+    }
+}
+
+#[cfg(nexio_poll)]
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle {
+            let _ = REACTOR.try_with(|r| {
+                if let Ok(mut r) = r.try_borrow_mut() {
+                    r.cancel_timer(h);
+                }
+            });
+        }
     }
 }
 

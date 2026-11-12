@@ -20,6 +20,7 @@
 //! 6. `Complete -> ignore` frees the buffer and slot immediately.
 //! 7. `poll_and_consume` frees the slot and bumps generation on `Complete`.
 
+#![cfg(nexio_uring)]
 #![cfg_attr(not(kani), allow(unexpected_cfgs))]
 
 #[cfg(kani)]

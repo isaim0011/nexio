@@ -111,3 +111,37 @@ jobs:
         # The prebuilt cargo-fuzz binary is a musl build and would default to the musl
         # target, where sanitizers cannot work; pin the GNU target explicitly.
         run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu slab_ops -- -max_total_time=60
+
+  portable:
+    name: Portable backend (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (IOCP)
+            os: windows-latest
+            args: ""
+          - name: macOS (kqueue)
+            os: macos-latest
+            args: ""
+          - name: Linux (epoll)
+            os: ubuntu-latest
+            args: "--features poll"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run tests
+        run: cargo test ${{ matrix.args }}
+
+      - name: Build examples
+        run: cargo build --examples ${{ matrix.args }}
+
+      - name: Clippy (library, tests, examples)
+        run: cargo clippy --lib --tests --examples ${{ matrix.args }} -- -D warnings

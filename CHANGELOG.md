@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Portable backend** (epoll / kqueue / IOCP via `polling` and `socket2`) for Windows, macOS and other Unix,
+  selected automatically off Linux or with `--features poll` on Linux. Covers TCP, timers and everything in
+  the executor; UDP and async file I/O are not implemented on it yet. Same API, verified by a shared test file
+  that passes on io_uring, epoll and Windows.
+- Backend selection moved to a build script (`nexio_uring` / `nexio_poll` cfgs).
+- `TcpStream::read_exact` returns `()` instead of the byte count (breaking, matches `File::read_exact_at`).
+- Internal `reactor::op` and `reactor::slab` hidden from the docs and excluded from semver.
+
 ## 0.1.0
 
 First release. Linux only; pre-1.0, so the API may still change.

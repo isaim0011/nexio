@@ -74,6 +74,10 @@ where
         .collect()
 }
 
+#[cfg(not(target_os = "linux"))]
+fn pin_to_cpu(_cpu: usize) {}
+
+#[cfg(target_os = "linux")]
 fn pin_to_cpu(cpu: usize) {
     // SAFETY: cpu_set_t is plain data; sched_setaffinity only reads it.
     unsafe {

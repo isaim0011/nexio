@@ -3,9 +3,17 @@
 //!
 //!     cargo run --release --example file_and_timeout
 
+#[cfg(nexio_uring)]
 use nexio::{fs::File, time};
+#[cfg(nexio_uring)]
 use std::time::Duration;
 
+#[cfg(nexio_poll)]
+fn main() {
+    eprintln!("this example needs async file I/O, which only the io_uring backend has so far");
+}
+
+#[cfg(nexio_uring)]
 fn main() -> std::io::Result<()> {
     let path = std::env::temp_dir().join("nexio_example.txt");
     nexio::block_on(async {

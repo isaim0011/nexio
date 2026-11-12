@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["isaim0011"]
 rust-version = "1.75"
-description = "A thread-per-core io_uring async runtime for Linux with owned-buffer I/O and a cancellation-safety layer checked by Miri and Kani"
+description = "A thread-per-core async runtime with owned-buffer I/O: io_uring on Linux (cancellation layer checked by Miri and Kani), a portable epoll/kqueue/IOCP backend elsewhere"
 readme = "README.md"
 keywords = ["io-uring", "async", "runtime", "linux", "network"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
@@ -18,18 +18,31 @@ default = []
 # the reactor falls back to a plain ring on older kernels). Enable this feature
 # to turn them off, e.g. to A/B them in benchmarks.
 no-coop-taskrun = []
+# Use the portable readiness backend (epoll/kqueue/IOCP) even on Linux, e.g. where io_uring is blocked.
+poll = ["dep:polling", "dep:socket2"]
 
 [dependencies]
-io-uring = "0.6"
 slab     = "0.4"
 libc     = "0.2"
 pin-project-lite = "0.2"
+# Portable backend; pulled in automatically off Linux, or on Linux with `--features poll`.
+polling  = { version = "3", optional = true }
+socket2  = { version = "0.5", features = ["all"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+polling  = "3"
+socket2  = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 tokio     = { version = "1", features = ["full"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 socket2   = { version = "0.5", features = ["all"] }
 num_cpus  = "1"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 compio    = { version = "0.19.2", features = ["runtime", "io-uring", "io", "net", "fs"] }
 monoio    = "0.2.4"
 core_affinity = "0.8.3"

@@ -5,6 +5,8 @@
 //! - Massive concurrent `-ECANCELED` vs real completion races (200+ ops)
 //! - Error paths (`ECONNREFUSED`, `UnexpectedEof`, `WriteZero` / `EPIPE`, `timeout`)
 
+#![cfg(nexio_uring)]
+
 use std::{
     future::Future,
     io,

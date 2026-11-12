@@ -114,7 +114,7 @@ Do what the incumbents conspicuously don't:
 - [x] Registered buffers/files and SQPOLL exist as opt-in `ReactorBuilder` options (`register_buffers`,
       `read_fixed`, `write_fixed`, `register_files`, SQPOLL); none is on by default
 - [x] Multishot accept/recv: **measured and rejected** (see below); not implemented in nexio
-- [ ] Cross-platform fallback (Windows/macOS): not started; nexio refuses to compile off Linux with a clear error
+- [x] Cross-platform fallback: see Phase 6
 
 ## Measured and rejected (details and raw numbers in `reports/split_benchmark_results.md`)
 
@@ -155,6 +155,32 @@ Open, in priority order:
 - [ ] Longer soak (hours) and a leak check at finer resolution than "does not grow in 10 minutes"
 - [ ] Mainline kernel coverage (5.11-5.14) and kernels with io_uring restricted by seccomp or sysctl
 - [ ] Publish to crates.io and make the repository public (needs the owner's explicit go-ahead)
+
+## Phase 6 — the whole ecosystem, not only Linux
+
+Decision: keep `io_uring` as the Linux backend, untouched and still verified, and add a **portable readiness
+backend** built on the `polling` crate (epoll on Linux, kqueue on macOS/BSD, IOCP on Windows) and `socket2`.
+Only the reactor and the socket layer differ; the executor, channels, `select`/`join` and `JoinSet` are shared.
+A readiness backend never gives the kernel a pointer to a caller's buffer, so cancellation safety is simpler
+there (dropping a pending future abandons a wait) and needs no completion slab.
+
+Done:
+- [x] Build-time backend selection (`build.rs`); `--features poll` forces the portable backend on Linux
+- [x] Portable reactor: per-direction wakers, re-arming when one direction fires, timer map
+- [x] Portable `TcpListener` / `TcpStream`, timers (`sleep`, `timeout`, `interval`)
+- [x] Backend-neutral API test file (`tests/portable_api.rs`): echo, 4 MiB with simultaneous read and write on
+      one socket, refused connect, EOF, cancelled read and accept, 200 concurrent clients, timer ordering.
+      Passes on io_uring, Linux epoll and Windows
+- [x] CI matrix: Windows, macOS, Linux epoll
+
+Open, in priority order:
+- [ ] Confirm macOS (kqueue) is green in CI and fix whatever it finds
+- [ ] `UdpSocket` on the portable backend
+- [ ] Async file I/O on the portable backend (a small blocking thread pool; files have no readiness)
+- [ ] Soak and fuzz-style leak checks on the portable backend (the existing soak example already runs on it)
+- [ ] Runtime fallback: try `io_uring`, fall back to epoll on failure (today it is a build-time choice)
+- [ ] Windows multi-core story (`SO_REUSEPORT` does not exist there)
+- [ ] Native IOCP backend only if measurements show the readiness layer is a bottleneck on Windows
 
 ## Phase 5 — features users will ask for
 

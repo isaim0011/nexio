@@ -9,6 +9,8 @@
 //! Run with: cargo test --test slab_invariants
 //! Run with Miri: cargo +nightly miri test --test slab_invariants
 
+#![cfg(nexio_uring)]
+
 use nexio::reactor::slab::{CompletionSlab, OpState, PlaceholderBuf, SlabKey};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

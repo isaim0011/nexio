@@ -20,13 +20,19 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs, unreachable_pub)]
 
-#[cfg(not(target_os = "linux"))]
-compile_error!("nexio is built on io_uring and only supports Linux");
-
 pub mod buf;
 pub mod executor;
+#[cfg(nexio_uring)]
 pub mod fs;
+#[cfg(nexio_uring)]
 pub mod net;
+#[cfg(nexio_poll)]
+#[path = "poll/net.rs"]
+pub mod net;
+#[cfg(nexio_uring)]
+pub mod reactor;
+#[cfg(nexio_poll)]
+#[path = "poll/reactor.rs"]
 pub mod reactor;
 mod shard;
 pub mod time;

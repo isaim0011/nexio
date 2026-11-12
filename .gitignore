@@ -5,3 +5,4 @@ research_notes/
 /fuzz/artifacts
 /fuzz/corpus
 /scripts/kernel_matrix/kinit/target
+/Cargo.lock

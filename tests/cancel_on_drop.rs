@@ -12,6 +12,8 @@
 //! 4. Investigating socket fd leak when TcpListener::accept is dropped.
 //! 5. Investigating socket fd leak when TcpStream::connect is dropped.
 
+#![cfg(nexio_uring)]
+
 use nexio::reactor::slab::{CompletionSlab, ErasedBuf, OpState, PlaceholderBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
