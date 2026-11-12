@@ -33,6 +33,18 @@ struct Sock {
 }
 
 #[cfg(nexio_uring)]
+impl Drop for Sock {
+    fn drop(&mut self) {
+        // Submit queued operations before the socket's descriptor is closed (see `close_fd`).
+        let _ = crate::reactor::REACTOR.try_with(|r| {
+            if let Ok(mut r) = r.try_borrow_mut() {
+                r.flush_queued();
+            }
+        });
+    }
+}
+
+#[cfg(nexio_uring)]
 impl Sock {
     fn new(sock: Socket) -> io::Result<Self> {
         sock.set_nonblocking(true)?;
@@ -68,7 +80,8 @@ fn send_nosig(sock: &Socket, data: &[u8]) -> io::Result<usize> {
     }
     #[cfg(target_vendor = "apple")]
     {
-        sock.set_nosigpipe(true)?;
+        // SO_NOSIGPIPE was set when the socket was registered; setting it again fails with
+        // EINVAL once the peer has closed.
         sock.send(data)
     }
 }
@@ -149,9 +162,21 @@ impl UnixStream {
         let addr = SockAddr::unix(path)?;
         let io = Sock::new(Socket::new(Domain::UNIX, Type::STREAM, None)?)?;
         let mut delay = Duration::from_micros(200);
+        // macOS reports a full listen queue as ECONNREFUSED instead of EAGAIN. Retry that for a
+        // bounded time, so a genuinely absent listener still fails.
+        let mut refused_retries = 0u32;
         loop {
             match io.sock.connect(&addr) {
                 Ok(()) => return Ok(Self { io }),
+                Err(e)
+                    if cfg!(target_vendor = "apple")
+                        && e.kind() == io::ErrorKind::ConnectionRefused
+                        && refused_retries < 300 =>
+                {
+                    refused_retries += 1;
+                    crate::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_millis(10));
+                }
                 Err(e) if would_block(&e) => {
                     crate::time::sleep(delay).await;
                     delay = (delay * 2).min(Duration::from_millis(10));

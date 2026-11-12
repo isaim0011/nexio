@@ -690,6 +690,11 @@ impl Reactor {
         self.drain_completions()
     }
 
+    /// Hand every queued SQE to the kernel without waiting for completions.
+    pub(crate) fn flush_queued(&mut self) {
+        let _ = self.ring.submit();
+    }
+
     /// Flush buffered SQEs and drain available CQEs without blocking.
     pub fn submit_and_poll(&mut self) -> io::Result<usize> {
         // Note: submit_and_wait(0) submits pending SQEs and runs deferred task_work
@@ -732,6 +737,26 @@ impl Reactor {
         }
         Ok(count)
     }
+}
+
+/// Close `fd` after handing any queued operations to the kernel.
+///
+/// An SQE names its file by number and the kernel resolves the number when the SQE is
+/// *submitted*, not when it is queued. If a descriptor were closed while an operation on it
+/// still sat in the submission queue, the number could be reused (by the next `socket()` or
+/// `accept`) and the stale operation would run on the wrong file, for example stealing the
+/// first bytes of an unrelated connection. Submitting first pins the right file.
+pub(crate) fn close_fd(fd: std::os::fd::RawFd) {
+    if fd < 0 {
+        return;
+    }
+    let _ = REACTOR.try_with(|r| {
+        if let Ok(mut r) = r.try_borrow_mut() {
+            r.flush_queued();
+        }
+    });
+    // SAFETY: the caller owns `fd` and never uses it again.
+    unsafe { libc::close(fd) };
 }
 
 // ── Helper: SocketAddr -> (libc::sockaddr_storage, libc::socklen_t) ────────────

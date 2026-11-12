@@ -2,7 +2,18 @@
 
 ## Unreleased
 
+### Added
+- `compat` (feature `tokio-compat`): tokio `AsyncRead`/`AsyncWrite` adapter for nexio streams.
+- `tls` (feature `tls`): TLS client/server over `rustls`, with truncation detection and ALPN.
+- `http` (feature `http`): HTTP/1.1 client and server on `hyper`, plain or over TLS.
+
 ### Fixed (affects the published 0.1.0)
+- **A closed descriptor could be reused before a queued `io_uring` operation on it was submitted.** nexio
+  batches submissions, and the kernel resolves an SQE's file number at submit time. Dropping a stream
+  with a read still in the submission queue closed the number, a new socket took it, and the stale read
+  then ran on the new connection and swallowed its first bytes (the request simply never arrived).
+  Every close now submits queued operations first. Found by the HTTP concurrency test (5+ parallel
+  connections hung deterministically); passes on both backends.
 - **`UdpSocket::recv_from` on the io_uring backend did not wait.** On an unconnected socket it made one
   non-blocking `recvfrom` call and returned `WouldBlock` if no datagram was queued, so
   `recv_from(buf).await` in a UDP server failed spuriously. The connected `recv`/`send` and `send_to`
@@ -51,9 +62,7 @@ First release. Linux only; pre-1.0, so the API may still change.
 - Full test suite and soak on vendor kernels 5.10 (Debian), 5.15 (Ubuntu 22.04) and 6.1 (Debian), and 6.12.
 
 ### Known limits
-- Linux only; compiling for other targets is a deliberate error.
-- No TLS, async DNS (hostname resolution uses the blocking std resolver), Unix-domain sockets, signals
-  or process spawning, and no tokio `AsyncRead`/`AsyncWrite` compatibility.
+- No HTTP/2 (hyper needs `Send` tasks). The portable backend has had no soak/fuzz campaign.
 - Miri and Kani cannot execute `io_uring` syscalls, so they cover the pure-Rust bookkeeping only.
 - Mainline kernels 5.11 to 5.14 and distributions other than those above are untested.
 - Performance is competitive with other io_uring runtimes (about 5-12% less server CPU per message on a

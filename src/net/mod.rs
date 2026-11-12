@@ -104,9 +104,7 @@ pub(crate) struct CloseOnDrop(pub(crate) RawFd);
 
 impl Drop for CloseOnDrop {
     fn drop(&mut self) {
-        if self.0 >= 0 {
-            unsafe { libc::close(self.0) };
-        }
+        crate::reactor::close_fd(self.0);
     }
 }
 
@@ -440,7 +438,7 @@ impl TcpListener {
 
 impl Drop for TcpListener {
     fn drop(&mut self) {
-        unsafe { libc::close(self.fd) };
+        crate::reactor::close_fd(self.fd);
     }
 }
 
@@ -1024,7 +1022,7 @@ impl TcpStream {
 
 impl Drop for TcpStream {
     fn drop(&mut self) {
-        unsafe { libc::close(self.fd) };
+        crate::reactor::close_fd(self.fd);
     }
 }
 

@@ -23,12 +23,15 @@
 pub mod addr;
 pub mod blocking;
 pub mod buf;
+pub mod compat;
 pub mod executor;
 #[cfg(nexio_uring)]
 pub mod fs;
 #[cfg(nexio_poll)]
 #[path = "poll/fs.rs"]
 pub mod fs;
+#[cfg(feature = "http")]
+pub mod http;
 #[cfg(nexio_uring)]
 pub mod net;
 #[cfg(nexio_poll)]
@@ -43,6 +46,8 @@ pub mod reactor;
 mod shard;
 pub mod signal;
 pub mod time;
+#[cfg(feature = "tls")]
+pub mod tls;
 
 pub use blocking::spawn_blocking;
 pub use executor::{block_on, join2, select2, spawn, yield_now, JoinSet};

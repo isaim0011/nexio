@@ -20,6 +20,12 @@ default = []
 no-coop-taskrun = []
 # Use the portable readiness backend (epoll/kqueue/IOCP) even on Linux, e.g. where io_uring is blocked.
 poll = ["dep:polling"]
+# Implement tokio::io::AsyncRead/AsyncWrite for nexio streams (nexio::compat::Compat).
+tokio-compat = ["dep:tokio"]
+# HTTP/1.1 client and server built on hyper (implies the hyper I/O traits for Compat).
+http = ["dep:hyper", "dep:http-body-util"]
+# TLS via rustls (nexio::tls), crypto provider ring.
+tls = ["dep:rustls"]
 
 [dependencies]
 slab     = "0.4"
@@ -27,6 +33,10 @@ libc     = "0.2"
 pin-project-lite = "0.2"
 # Portable backend; pulled in automatically off Linux, or on Linux with `--features poll`.
 polling  = { version = "3", optional = true }
+tokio    = { version = "1", default-features = false, optional = true }
+hyper    = { version = "1", default-features = false, features = ["http1", "client", "server"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+rustls   = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 socket2  = { version = "0.5", features = ["all"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -46,6 +56,7 @@ tokio     = { version = "1", features = ["full"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 socket2   = { version = "0.5", features = ["all"] }
 num_cpus  = "1"
+rcgen     = "0.13"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 compio    = { version = "0.19.2", features = ["runtime", "io-uring", "io", "net", "fs"] }

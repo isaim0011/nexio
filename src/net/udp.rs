@@ -717,7 +717,7 @@ impl UdpSocket {
 
 impl Drop for UdpSocket {
     fn drop(&mut self) {
-        unsafe { libc::close(self.fd) };
+        crate::reactor::close_fd(self.fd);
     }
 }
 

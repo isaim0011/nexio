@@ -282,11 +282,11 @@ fn datagrams_report_the_sender_path_and_keep_boundaries() {
     block_on(async {
         let a = UnixDatagram::bind(&pa).unwrap();
         let b = UnixDatagram::bind(&pb).unwrap();
+        // One datagram at a time: macOS queues very little per datagram socket, so a long
+        // unread backlog fails there with ENOBUFS.
         for i in 0..50u8 {
             let (res, _) = a.send_to(pattern(1 + i as usize, i), &pb).await;
             res.unwrap();
-        }
-        for i in 0..50u8 {
             let (res, buf) = b.recv_from(vec![0u8; 1024]).await;
             let (n, from) = res.unwrap();
             assert_eq!(buf[..n], pattern(1 + i as usize, i)[..]);

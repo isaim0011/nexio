@@ -141,11 +141,27 @@ Limits: Miri and Kani cannot execute `io_uring` syscalls, so they cover the pure
 the kernel interaction. Cancellation of an in-flight `io_uring` operation is best-effort at the kernel
 level; nexio's guarantee is that memory stays valid until the kernel is done with it.
 
-## What is not here (yet)
+## Optional features
 
-Still missing, in the order they are planned (see [`ROADMAP.md`](ROADMAP.md)): signal handling, process spawning, an `AsyncRead`/`AsyncWrite` compatibility layer for the tokio ecosystem
-(the owned-buffer API is different on purpose, so this is an adapter), and TLS and HTTP built on top of that
-adapter with `rustls` and `hyper` rather than written from scratch.
+| Feature | Adds |
+|---|---|
+| `tokio-compat` | `nexio::compat::Compat`: use nexio TCP/Unix streams through tokio's `AsyncRead`/`AsyncWrite` (no tokio runtime needed) |
+| `tls` | `nexio::tls`: `TlsConnector`/`TlsAcceptor`/`TlsStream` over `rustls` (ring provider). Truncated streams are an `UnexpectedEof` error, never a clean end |
+| `http` | `nexio::http`: HTTP/1.1 client and server on `hyper` (HTTPS by passing a `TlsStream`) |
+| `poll` | Force the portable backend on Linux |
+
+nexio contains no cryptography and no HTTP parser of its own: those are `rustls` and `hyper`, wired to
+nexio's sockets. HTTP/2 is not provided, because hyper's HTTP/2 needs `Send` tasks and nexio's are
+thread-local by design.
+
+## What is not here
+
+* HTTP/2 and HTTP/3 (see above), WebSockets, and a trust store for TLS (you pick the roots, for example
+  `webpki-roots`).
+* The portable backend (Windows, macOS, other Unix) is verified by tests and CI but has not had the soak,
+  fuzz and kernel-matrix campaigns the `io_uring` backend has had. Files there use a blocking thread pool.
+
+See [`ROADMAP.md`](ROADMAP.md).
 
 ## Building and testing
 

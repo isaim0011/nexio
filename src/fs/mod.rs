@@ -195,9 +195,7 @@ impl FromRawFd for File {
 
 impl Drop for File {
     fn drop(&mut self) {
-        if self.fd >= 0 {
-            unsafe { libc::close(self.fd) };
-        }
+        crate::reactor::close_fd(self.fd);
     }
 }
 

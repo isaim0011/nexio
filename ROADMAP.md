@@ -181,15 +181,16 @@ Open, in priority order:
 - [ ] Windows multi-core story (`SO_REUSEPORT` does not exist there)
 - [ ] Native IOCP backend only if measurements show the readiness layer is a bottleneck on Windows
 
-## Phase 5 — features users will ask for
+## Phase 5 — features users will ask for (done)
 
-None started. Listed so nobody assumes they exist:
-- [ ] Async hostname resolution (today `bind`/`connect` with a hostname block on the std resolver)
-- [ ] Unix-domain sockets
-- [ ] Signal handling, process spawning
-- [ ] TLS integration story (an adapter crate, not part of the core)
-- [ ] An optional compatibility layer for tokio-style `AsyncRead`/`AsyncWrite`
-- [ ] Cross-platform fallback backend (see Phase 3)
+- [x] Async hostname resolution
+- [x] Unix-domain sockets
+- [x] Signal handling, process spawning
+- [x] TLS (`tls` feature, over rustls)
+- [x] tokio `AsyncRead`/`AsyncWrite` compatibility (`tokio-compat` feature)
+- [x] HTTP/1.1 client and server (`http` feature, over hyper)
+- [x] Cross-platform fallback backend (see Phase 3)
+- [ ] HTTP/2 (blocked: hyper requires `Send` tasks)
 
 ## What "beating" tokio/compio/monoio actually means here
 

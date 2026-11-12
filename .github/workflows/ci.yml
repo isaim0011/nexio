@@ -24,7 +24,7 @@ jobs:
           components: rustfmt
 
       - name: Run tests (lib, integration, doc)
-        run: cargo test
+        run: cargo test --features http,tls,tokio-compat
 
       - name: Check formatting
         run: cargo fmt --check
@@ -33,7 +33,7 @@ jobs:
         run: cargo build --examples --benches
 
       - name: Rustdoc with warnings as errors
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps --features http,tls,tokio-compat
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -50,7 +50,7 @@ jobs:
           components: clippy
 
       - name: Run clippy checks
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features http,tls,tokio-compat -- -D warnings
 
   miri:
     name: Miri Verification
@@ -121,13 +121,13 @@ jobs:
         include:
           - name: Windows (IOCP)
             os: windows-latest
-            args: ""
+            args: "--features http,tls,tokio-compat"
           - name: macOS (kqueue)
             os: macos-latest
-            args: ""
+            args: "--features http,tls,tokio-compat"
           - name: Linux (epoll)
             os: ubuntu-latest
-            args: "--features poll"
+            args: "--features poll,http,tls,tokio-compat"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
