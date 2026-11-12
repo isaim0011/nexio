@@ -108,4 +108,6 @@ jobs:
           tool: cargo-fuzz
 
       - name: Fuzz for 60 seconds
-        run: cargo +nightly fuzz run slab_ops -- -max_total_time=60
+        # The prebuilt cargo-fuzz binary is a musl build and would default to the musl
+        # target, where sanitizers cannot work; pin the GNU target explicitly.
+        run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu slab_ops -- -max_total_time=60
