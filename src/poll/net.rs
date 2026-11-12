@@ -6,8 +6,8 @@
 //! reactor to report readiness and tries again.
 //!
 //! Differences from the io_uring backend:
-//! * `bind` and `connect` with a hostname resolve it with the standard
-//!   library's blocking resolver, as on the io_uring backend.
+//! * `bind` and `connect` accept host names; they are resolved on the blocking
+//!   pool (see [`lookup_host`]), never on the reactor thread.
 //! * `SO_REUSEPORT` is set where it exists (Unix other than Solaris/illumos);
 //!   `SO_REUSEADDR` only on Unix, because on Windows it permits port hijacking.
 //! * UDP and files are not implemented on this backend yet.
@@ -16,11 +16,12 @@ use std::{
     future::poll_fn,
     io,
     mem::MaybeUninit,
-    net::{Shutdown, SocketAddr, ToSocketAddrs},
+    net::{Shutdown, SocketAddr},
     task::Poll,
     time::Duration,
 };
 
+pub use crate::addr::{lookup_host, ToAddrs};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::{
@@ -125,9 +126,9 @@ pub struct TcpListener {
 impl TcpListener {
     /// Bind to `addr` and start listening. Hostnames are resolved with the
     /// blocking standard-library resolver.
-    pub async fn bind(addr: impl ToSocketAddrs) -> io::Result<Self> {
+    pub async fn bind(addr: impl crate::addr::ToAddrs) -> io::Result<Self> {
         let mut last = None;
-        for sa in addr.to_socket_addrs()? {
+        for sa in crate::addr::lookup_host(addr).await? {
             match Self::bind_addr(sa) {
                 Ok(l) => return Ok(l),
                 Err(e) => last = Some(e),
@@ -216,9 +217,9 @@ pub struct TcpStream {
 impl TcpStream {
     /// Connect to `addr`. Hostnames are resolved with the blocking
     /// standard-library resolver; the connect itself is asynchronous.
-    pub async fn connect(addr: impl ToSocketAddrs) -> io::Result<Self> {
+    pub async fn connect(addr: impl crate::addr::ToAddrs) -> io::Result<Self> {
         let mut last = None;
-        for sa in addr.to_socket_addrs()? {
+        for sa in crate::addr::lookup_host(addr).await? {
             match Self::connect_addr(sa).await {
                 Ok(s) => return Ok(s),
                 Err(e) => last = Some(e),

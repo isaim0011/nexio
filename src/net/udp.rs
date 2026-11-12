@@ -26,9 +26,9 @@ pub struct UdpSocket {
 
 impl UdpSocket {
     /// Bind to `addr` with `SO_REUSEPORT` and `SO_REUSEADDR` enabled.
-    pub async fn bind(addr: impl std::net::ToSocketAddrs) -> io::Result<Self> {
+    pub async fn bind(addr: impl crate::addr::ToAddrs) -> io::Result<Self> {
         let mut last_err = None;
-        let addrs = addr.to_socket_addrs()?;
+        let addrs = crate::addr::lookup_host(addr).await?;
         for sa in addrs {
             match Self::bind_addr(sa) {
                 Ok(socket) => return Ok(socket),
@@ -115,9 +115,9 @@ impl UdpSocket {
     ///
     /// This sets the default peer address for subsequent [`send`](Self::send) and
     /// [`recv`](Self::recv) calls.
-    pub async fn connect(&self, addr: impl std::net::ToSocketAddrs) -> io::Result<()> {
+    pub async fn connect(&self, addr: impl crate::addr::ToAddrs) -> io::Result<()> {
         let mut last_err = None;
-        let addrs = addr.to_socket_addrs()?;
+        let addrs = crate::addr::lookup_host(addr).await?;
         for sa in addrs {
             match self.connect_addr(sa) {
                 Ok(()) => return Ok(()),

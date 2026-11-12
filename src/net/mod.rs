@@ -5,6 +5,7 @@
 pub mod udp;
 pub use udp::UdpSocket;
 
+pub use crate::addr::{lookup_host, ToAddrs};
 use std::{
     io,
     net::SocketAddr,
@@ -113,9 +114,9 @@ pub struct TcpListener {
 
 impl TcpListener {
     /// Bind to `addr` with `SO_REUSEPORT` and `SO_REUSEADDR` enabled, and start listening.
-    pub async fn bind(addr: impl std::net::ToSocketAddrs) -> io::Result<Self> {
+    pub async fn bind(addr: impl crate::addr::ToAddrs) -> io::Result<Self> {
         let mut last_err = None;
-        let addrs = addr.to_socket_addrs()?;
+        let addrs = crate::addr::lookup_host(addr).await?;
         for sa in addrs {
             match Self::bind_addr(sa) {
                 Ok(listener) => return Ok(listener),
@@ -465,9 +466,9 @@ pub struct TcpStream {
 
 impl TcpStream {
     /// Connect to `addr` via io_uring.
-    pub async fn connect(addr: impl std::net::ToSocketAddrs) -> io::Result<Self> {
+    pub async fn connect(addr: impl crate::addr::ToAddrs) -> io::Result<Self> {
         let mut last_err = None;
-        let addrs = addr.to_socket_addrs()?;
+        let addrs = crate::addr::lookup_host(addr).await?;
         for sa in addrs {
             match Self::connect_addr(sa).await {
                 Ok(stream) => return Ok(stream),

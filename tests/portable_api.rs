@@ -237,3 +237,34 @@ fn sleep_waits_at_least_its_duration() {
         );
     });
 }
+
+#[test]
+fn host_names_work_for_bind_and_connect() {
+    block_on(async {
+        // `localhost` may resolve to ::1 first; connect must fall through to 127.0.0.1.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(spawn(echo_server(listener)));
+        let client = TcpStream::connect(("localhost", port)).await.unwrap();
+        let (res, _) = client.write_all(b"ping".to_vec()).await;
+        res.unwrap();
+        let (res, got) = client.read_exact(vec![0u8; 4]).await;
+        res.unwrap();
+        assert_eq!(got, b"ping");
+
+        // Binding by name, and by an owned/borrowed string, both resolve.
+        let by_name = TcpListener::bind(("localhost", 0)).await.unwrap();
+        assert!(by_name.local_addr().unwrap().ip().is_loopback());
+        let text = String::from("127.0.0.1:0");
+        let by_text = TcpListener::bind(&text).await.unwrap();
+        assert!(by_text.local_addr().unwrap().ip().is_loopback());
+    });
+}
+
+#[test]
+fn an_unresolvable_host_is_an_error_not_a_hang() {
+    block_on(async {
+        let r = TcpStream::connect(("nexio-no-such-host.invalid", 80)).await;
+        assert!(r.is_err());
+    });
+}

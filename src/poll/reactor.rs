@@ -13,6 +13,7 @@ use std::{
     cell::RefCell,
     collections::BTreeMap,
     io,
+    sync::Arc,
     task::Waker,
     time::{Duration, Instant},
 };
@@ -37,7 +38,8 @@ pub(crate) type TimerHandle = (Instant, u64);
 
 /// Thread-local readiness reactor.
 pub struct Reactor {
-    poller: Poller,
+    poller: Arc<Poller>,
+    mailbox: Arc<crate::blocking::Mailbox>,
     events: Events,
     sources: Slab<Source>,
     timers: BTreeMap<TimerHandle, Waker>,
@@ -53,13 +55,24 @@ thread_local! {
 impl Reactor {
     /// Create a reactor with its own poller.
     pub fn new() -> io::Result<Self> {
+        let poller = Arc::new(Poller::new()?);
+        let waker_poller = poller.clone();
+        let mailbox = Arc::new(crate::blocking::Mailbox::new(Box::new(move || {
+            let _ = waker_poller.notify();
+        })));
         Ok(Self {
-            poller: Poller::new()?,
+            poller,
+            mailbox,
             events: Events::new(),
             sources: Slab::new(),
             timers: BTreeMap::new(),
             next_timer: 0,
         })
+    }
+
+    /// The mailbox pool threads use to hand results back to this thread.
+    pub(crate) fn mailbox(&self) -> Arc<crate::blocking::Mailbox> {
+        self.mailbox.clone()
     }
 
     /// Register a socket and return its key. No interest is armed yet.
@@ -192,7 +205,14 @@ impl Reactor {
         for w in to_wake {
             w.wake();
         }
-        Ok(woken)
+        // Results handed back by blocking-pool threads.
+        let finished = self.mailbox.drain();
+        let blocking_woken = if finished.is_empty() {
+            0
+        } else {
+            crate::blocking::deliver(finished)
+        };
+        Ok(woken + blocking_woken)
     }
 }
 

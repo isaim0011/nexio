@@ -20,6 +20,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs, unreachable_pub)]
 
+pub mod addr;
+pub mod blocking;
 pub mod buf;
 pub mod executor;
 #[cfg(nexio_uring)]
@@ -37,6 +39,7 @@ pub mod reactor;
 mod shard;
 pub mod time;
 
+pub use blocking::spawn_blocking;
 pub use executor::{block_on, join2, select2, spawn, yield_now, JoinSet};
 pub use reactor::Reactor;
 pub use shard::run_sharded;
