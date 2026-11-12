@@ -197,9 +197,10 @@ where
     let boxed = Box::pin(wrapped);
     let cancelled_clone = Rc::clone(&is_cancelled);
     let task_id = EXECUTOR.with(|exec| {
-        exec.borrow_mut().insert_task(TaskWaker::into_waker, |id, waker| {
-            Task::new(id, waker, cancelled_clone, boxed, on_panic)
-        })
+        exec.borrow_mut()
+            .insert_task(TaskWaker::into_waker, |id, waker| {
+                Task::new(id, waker, cancelled_clone, boxed, on_panic)
+            })
     });
 
     JoinHandle {
@@ -341,9 +342,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             });
             poll_root = RootWaker::is_woken();
         } else {
-            REACTOR.with(|r| {
-                r.borrow_mut().park().expect("reactor park failed")
-            });
+            REACTOR.with(|r| r.borrow_mut().park().expect("reactor park failed"));
             poll_root = RootWaker::is_woken();
         }
     }

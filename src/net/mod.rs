@@ -18,7 +18,9 @@ use crate::{
 
 // ── Helpers for sockaddr conversion ──────────────────────────────────────────
 
-pub(crate) fn socket_addr_to_storage(addr: SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
+pub(crate) fn socket_addr_to_storage(
+    addr: SocketAddr,
+) -> (libc::sockaddr_storage, libc::socklen_t) {
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     match addr {
         SocketAddr::V4(v4) => {
@@ -121,7 +123,10 @@ impl TcpListener {
             }
         }
         Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
         }))
     }
 
@@ -176,13 +181,7 @@ impl TcpListener {
 
         // Bind address
         let (storage, socklen) = socket_addr_to_storage(addr);
-        let ret = unsafe {
-            libc::bind(
-                fd,
-                &storage as *const _ as *const libc::sockaddr,
-                socklen,
-            )
-        };
+        let ret = unsafe { libc::bind(fd, &storage as *const _ as *const libc::sockaddr, socklen) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -476,7 +475,10 @@ impl TcpStream {
             }
         }
         Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
         }))
     }
 
@@ -1048,7 +1050,9 @@ mod tests {
             let port = listener1.local_addr().unwrap().port();
 
             // Binding a second listener on the same port should succeed thanks to SO_REUSEPORT
-            let listener2 = TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
+            let listener2 = TcpListener::bind(format!("127.0.0.1:{port}"))
+                .await
+                .unwrap();
             assert_eq!(listener2.local_addr().unwrap().port(), port);
         });
     }
@@ -1348,8 +1352,13 @@ mod tests {
                 stream.set_keepalive(false).unwrap();
                 assert!(!stream.keepalive().unwrap());
 
-                stream.set_linger(Some(std::time::Duration::from_secs(3))).unwrap();
-                assert_eq!(stream.linger().unwrap(), Some(std::time::Duration::from_secs(3)));
+                stream
+                    .set_linger(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                assert_eq!(
+                    stream.linger().unwrap(),
+                    Some(std::time::Duration::from_secs(3))
+                );
                 stream.set_linger(None).unwrap();
                 assert_eq!(stream.linger().unwrap(), None);
 
@@ -1460,7 +1469,9 @@ mod tests {
         assert!(nexio_socket.take_error().unwrap().is_none());
 
         // Test connect & disconnect
-        nexio_socket.connect_addr("127.0.0.1:9999".parse().unwrap()).unwrap();
+        nexio_socket
+            .connect_addr("127.0.0.1:9999".parse().unwrap())
+            .unwrap();
         assert!(nexio_socket.peer_addr().is_ok());
         nexio_socket.disconnect().unwrap();
         assert!(nexio_socket.peer_addr().is_err());

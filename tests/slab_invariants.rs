@@ -9,11 +9,11 @@
 //! Run with: cargo test --test slab_invariants
 //! Run with Miri: cargo +nightly miri test --test slab_invariants
 
+use nexio::reactor::slab::{CompletionSlab, OpState, PlaceholderBuf, SlabKey};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use nexio::reactor::slab::{CompletionSlab, OpState, PlaceholderBuf, SlabKey};
 
 /// Buffer tracker for drop count verification.
 struct TrackDrop {
@@ -63,7 +63,11 @@ fn test_slab_key_arithmetic() {
         let raw = ((gen as u64) << 32) | (idx as u64);
         let key = SlabKey::from_u64(raw);
         assert_eq!(key.index(), idx, "Index mismatch for idx={idx}, gen={gen}");
-        assert_eq!(key.generation(), gen, "Generation mismatch for idx={idx}, gen={gen}");
+        assert_eq!(
+            key.generation(),
+            gen,
+            "Generation mismatch for idx={idx}, gen={gen}"
+        );
         assert_eq!(key.as_u64(), raw, "Raw u64 roundtrip mismatch");
     }
 }
@@ -135,7 +139,10 @@ fn test_adversarial_out_of_bounds_cqes() {
 
     for &raw in adversarial_keys {
         let waker = slab.complete(raw, 0);
-        assert!(waker.is_none(), "Expected None for adversarial key {raw:#x}");
+        assert!(
+            waker.is_none(),
+            "Expected None for adversarial key {raw:#x}"
+        );
     }
 
     // Insert one valid op
@@ -150,7 +157,10 @@ fn test_adversarial_out_of_bounds_cqes() {
             continue;
         }
         let waker = slab.complete(raw, -1);
-        assert!(waker.is_none(), "Adversarial key should not affect valid op");
+        assert!(
+            waker.is_none(),
+            "Adversarial key should not affect valid op"
+        );
     }
 
     // Valid op is still intact
@@ -176,7 +186,10 @@ fn test_adversarial_generation_mismatch() {
     for wrong_gen in [1u32, 2, 42, 1000, u32::MAX] {
         let stale_raw = ((wrong_gen as u64) << 32) | index;
         let w = slab.complete(stale_raw, 0);
-        assert!(w.is_none(), "Stale generation {wrong_gen} should be discarded");
+        assert!(
+            w.is_none(),
+            "Stale generation {wrong_gen} should be discarded"
+        );
     }
 
     // Original entry must still be valid and completeable
@@ -274,7 +287,8 @@ fn test_adversarial_property_fuzz() {
                     let fake_gen = (rng.next_u64() >> 32) as u32;
                     let target_key = ops[idx].key;
                     if fake_gen != target_key.generation() {
-                        let fake_user_data = ((fake_gen as u64) << 32) | (target_key.index() as u64);
+                        let fake_user_data =
+                            ((fake_gen as u64) << 32) | (target_key.index() as u64);
                         let w = slab.complete(fake_user_data, 0);
                         assert!(w.is_none(), "Mismatched gen must return None");
                     }

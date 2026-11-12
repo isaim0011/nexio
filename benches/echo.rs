@@ -136,7 +136,12 @@ fn print_hw_metadata() {
 
     println!("================================================================================");
     println!(" nexio Honest 3-Way Echo Benchmark");
-    println!(" System: {} vCPUs | CPU: {} | Linux kernel {}", num_cpus::get(), cpu_model, kernel);
+    println!(
+        " System: {} vCPUs | CPU: {} | Linux kernel {}",
+        num_cpus::get(),
+        cpu_model,
+        kernel
+    );
     println!("================================================================================");
 }
 
@@ -203,7 +208,9 @@ fn run_load_generator(
             let payload = vec![0x42u8; msg_size];
             let mut buf = vec![0u8; msg_size];
             for _ in 0..10 {
-                if warmup.write_all(&payload).await.is_err() || warmup.read_exact(&mut buf).await.is_err() {
+                if warmup.write_all(&payload).await.is_err()
+                    || warmup.read_exact(&mut buf).await.is_err()
+                {
                     break;
                 }
             }
@@ -626,7 +633,10 @@ fn start_monoio_sharded(
                 core_affinity::set_for_current(id);
             }
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let mut rt = match monoio::RuntimeBuilder::<monoio::IoUringDriver>::new().enable_all().build() {
+                let mut rt = match monoio::RuntimeBuilder::<monoio::IoUringDriver>::new()
+                    .enable_all()
+                    .build()
+                {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = ready_tx.send(Err(format!("monoio runtime build failed: {e}")));
@@ -736,7 +746,9 @@ fn run_single_benchmark(
                 return None;
             }
             Err(_) => {
-                eprintln!("[WARN] {backend} (msg_size={msg_size}) timed out waiting for server startup");
+                eprintln!(
+                    "[WARN] {backend} (msg_size={msg_size}) timed out waiting for server startup"
+                );
                 stop_flag.store(true, Ordering::Relaxed);
                 return None;
             }
@@ -746,7 +758,14 @@ fn run_single_benchmark(
     // Brief settling delay before load generator fires
     thread::sleep(Duration::from_millis(25));
 
-    let result = run_load_generator(backend, mode_name, port, connections, messages_per_conn, msg_size);
+    let result = run_load_generator(
+        backend,
+        mode_name,
+        port,
+        connections,
+        messages_per_conn,
+        msg_size,
+    );
 
     // Stop servers
     stop_flag.store(true, Ordering::Relaxed);
@@ -854,7 +873,10 @@ fn print_analysis(metrics: &[BenchMetrics]) {
     println!("\n=== Honest Comparative Analysis ===");
 
     // Group by (msg_size, connections)
-    let mut combinations: Vec<(usize, usize)> = metrics.iter().map(|m| (m.msg_size, m.connections)).collect();
+    let mut combinations: Vec<(usize, usize)> = metrics
+        .iter()
+        .map(|m| (m.msg_size, m.connections))
+        .collect();
     combinations.sort_unstable();
     combinations.dedup();
 
@@ -866,18 +888,27 @@ fn print_analysis(metrics: &[BenchMetrics]) {
         if size_metrics.is_empty() {
             continue;
         }
-        println!("\n--- Message Size: {} Bytes | Connections: {} ---", msg_size, connections);
+        println!(
+            "\n--- Message Size: {} Bytes | Connections: {} ---",
+            msg_size, connections
+        );
         let tokio_unsharded = size_metrics.iter().find(|m| m.backend == "tokio_unsharded");
         let tokio_sharded = size_metrics.iter().find(|m| m.backend == "tokio_sharded");
 
         for m in &size_metrics {
             let vs_unsharded = if let Some(tu) = tokio_unsharded {
-                format!("{:.2}x vs tokio_unsharded", m.throughput_msgs_sec / tu.throughput_msgs_sec)
+                format!(
+                    "{:.2}x vs tokio_unsharded",
+                    m.throughput_msgs_sec / tu.throughput_msgs_sec
+                )
             } else {
                 "-".into()
             };
             let vs_sharded = if let Some(ts) = tokio_sharded {
-                format!("{:.2}x vs tokio_sharded", m.throughput_msgs_sec / ts.throughput_msgs_sec)
+                format!(
+                    "{:.2}x vs tokio_sharded",
+                    m.throughput_msgs_sec / ts.throughput_msgs_sec
+                )
             } else {
                 "-".into()
             };
@@ -896,9 +927,16 @@ fn print_analysis(metrics: &[BenchMetrics]) {
     if conn_levels.len() > 1 {
         let low_c = conn_levels[0];
         let high_c = conn_levels[conn_levels.len() - 1];
-        println!("\n================================================================================");
-        println!(" High-Concurrency Scaling Impact ({} conns -> {} conns)", low_c, high_c);
-        println!("================================================================================");
+        println!(
+            "\n================================================================================"
+        );
+        println!(
+            " High-Concurrency Scaling Impact ({} conns -> {} conns)",
+            low_c, high_c
+        );
+        println!(
+            "================================================================================"
+        );
 
         let mut msg_sizes: Vec<usize> = metrics.iter().map(|m| m.msg_size).collect();
         msg_sizes.sort_unstable();
@@ -911,8 +949,12 @@ fn print_analysis(metrics: &[BenchMetrics]) {
             backends.dedup();
 
             for backend in &backends {
-                let m_low = metrics.iter().find(|m| m.msg_size == msg_size && m.connections == low_c && &m.backend == backend);
-                let m_high = metrics.iter().find(|m| m.msg_size == msg_size && m.connections == high_c && &m.backend == backend);
+                let m_low = metrics.iter().find(|m| {
+                    m.msg_size == msg_size && m.connections == low_c && &m.backend == backend
+                });
+                let m_high = metrics.iter().find(|m| {
+                    m.msg_size == msg_size && m.connections == high_c && &m.backend == backend
+                });
 
                 if let (Some(l), Some(h)) = (m_low, m_high) {
                     let tput_ratio = h.throughput_msgs_sec / l.throughput_msgs_sec;
@@ -1012,10 +1054,14 @@ fn parse_cli_args() -> BenchConfig {
 /// /proc, giving CPU-seconds-per-message independent of who saturates first.
 fn run_split_mode(args: &[String]) -> bool {
     let get = |flag: &str| -> Option<String> {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1).cloned())
     };
     let port: u16 = get("--port").and_then(|s| s.parse().ok()).unwrap_or(0);
-    let msg_size: usize = get("--msg-size").and_then(|s| s.parse().ok()).unwrap_or(128);
+    let msg_size: usize = get("--msg-size")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(128);
     let shards: usize = get("--shards").and_then(|s| s.parse().ok()).unwrap_or(1);
 
     if let Some(backend) = get("--server-only") {
@@ -1034,7 +1080,11 @@ fn run_split_mode(args: &[String]) -> bool {
                 std::process::exit(2);
             }
         };
-        let n = if backend == "tokio_unsharded" { 1 } else { shards };
+        let n = if backend == "tokio_unsharded" {
+            1
+        } else {
+            shards
+        };
         for _ in 0..n {
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(Ok(())) => {}
@@ -1051,8 +1101,12 @@ fn run_split_mode(args: &[String]) -> bool {
     }
 
     if args.iter().any(|a| a == "--client-only") {
-        let conns: usize = get("--connections").and_then(|s| s.parse().ok()).unwrap_or(100);
-        let msgs: usize = get("--messages").and_then(|s| s.parse().ok()).unwrap_or(500);
+        let conns: usize = get("--connections")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let msgs: usize = get("--messages")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(500);
         match run_load_generator("split", "split", port, conns, msgs, msg_size) {
             Ok(m) => println!(
                 "RESULT total={} wall_s={:.4} throughput={:.0} p50_us={:.1} p99_us={:.1}",
@@ -1134,11 +1188,19 @@ fn main() {
     let mut all_results = Vec::new();
 
     for mode in &modes {
-        println!("\n################################################################################");
+        println!(
+            "\n################################################################################"
+        );
         println!(">>> Mode: {} <<<", mode.name);
-        println!("    Connections: {} | Messages/Conn: {} | Total Messages/Backend: {}",
-            mode.connections, mode.messages_per_conn, mode.connections * mode.messages_per_conn);
-        println!("################################################################################");
+        println!(
+            "    Connections: {} | Messages/Conn: {} | Total Messages/Backend: {}",
+            mode.connections,
+            mode.messages_per_conn,
+            mode.connections * mode.messages_per_conn
+        );
+        println!(
+            "################################################################################"
+        );
 
         for &msg_size in &cfg.msg_sizes {
             println!("\n>>> Benchmarking message size: {} bytes <<<", msg_size);

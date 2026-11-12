@@ -50,13 +50,18 @@ fn main() {
     // Receivers: one thread on core 1 draining all N sockets via epoll.
     let rx = std::thread::spawn(move || {
         pin(1);
-        let mut socks: Vec<TcpStream> = (0..conns).map(|_| TcpStream::connect(addr).unwrap()).collect();
+        let mut socks: Vec<TcpStream> = (0..conns)
+            .map(|_| TcpStream::connect(addr).unwrap())
+            .collect();
         for s in &socks {
             s.set_nonblocking(true).unwrap();
         }
         let ep = unsafe { libc::epoll_create1(0) };
         for (i, s) in socks.iter().enumerate() {
-            let mut ev = libc::epoll_event { events: libc::EPOLLIN as u32, u64: i as u64 };
+            let mut ev = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: i as u64,
+            };
             unsafe { libc::epoll_ctl(ep, libc::EPOLL_CTL_ADD, s.as_raw_fd(), &mut ev) };
         }
         let mut got = vec![0usize; conns];
@@ -104,7 +109,9 @@ fn main() {
             {
                 let mut sq = ring.submission();
                 for (i, fd) in fds.iter().enumerate() {
-                    let e = opcode::Send::new(*fd, payload.as_ptr(), size as u32).build().user_data(i as u64);
+                    let e = opcode::Send::new(*fd, payload.as_ptr(), size as u32)
+                        .build()
+                        .user_data(i as u64);
                     unsafe { sq.push(&e).unwrap() };
                 }
             }

@@ -132,10 +132,7 @@ impl<B: IoBuf + IoBufMut> Deref for Slice<B> {
     fn deref(&self) -> &[u8] {
         // SAFETY: begin..end is a valid subrange of the allocated buffer.
         unsafe {
-            std::slice::from_raw_parts(
-                self.buf.stable_ptr().add(self.begin),
-                self.end - self.begin,
-            )
+            std::slice::from_raw_parts(self.buf.stable_ptr().add(self.begin), self.end - self.begin)
         }
     }
 }

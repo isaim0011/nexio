@@ -67,9 +67,10 @@ fn main() {
     let cpu0 = thread_cpu();
     let t0 = Instant::now();
     for _ in 0..count {
-        let sent_ok;
-        if zc {
-            let e = opcode::SendZc::new(fd, buf.as_ptr(), size as u32).build().user_data(1);
+        let sent_ok = if zc {
+            let e = opcode::SendZc::new(fd, buf.as_ptr(), size as u32)
+                .build()
+                .user_data(1);
             unsafe { ring.submission().push(&e).unwrap() };
             ring.submit_and_wait(1).unwrap();
             let mut notif = false;
@@ -91,16 +92,21 @@ fn main() {
                     }
                 }
             }
-            sent_ok = res;
+            res
         } else {
-            let e = opcode::Send::new(fd, buf.as_ptr(), size as u32).build().user_data(1);
+            let e = opcode::Send::new(fd, buf.as_ptr(), size as u32)
+                .build()
+                .user_data(1);
             unsafe { ring.submission().push(&e).unwrap() };
             ring.submit_and_wait(1).unwrap();
             let cqe = ring.completion().next().unwrap();
-            sent_ok = cqe.result();
-        }
+            cqe.result()
+        };
         if sent_ok < 0 {
-            eprintln!("send failed: {}", std::io::Error::from_raw_os_error(-sent_ok));
+            eprintln!(
+                "send failed: {}",
+                std::io::Error::from_raw_os_error(-sent_ok)
+            );
             std::process::exit(1);
         }
         // Short sends are possible with large sizes; finish the message synchronously.

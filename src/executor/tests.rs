@@ -14,8 +14,8 @@ use std::{
 };
 
 use super::{
-    block_on, channel::mpsc, channel::oneshot, join2, select2, spawn, yield_now, Either,
-    JoinError, JoinSet,
+    block_on, channel::mpsc, channel::oneshot, join2, select2, spawn, yield_now, Either, JoinError,
+    JoinSet,
 };
 
 /// Helper struct that increments a counter when dropped.
@@ -64,9 +64,7 @@ impl Future for SteppedFuture {
 #[test]
 fn test_spawn_and_join() {
     let result = block_on(async {
-        let handle = spawn(async {
-            40 + 2
-        });
+        let handle = spawn(async { 40 + 2 });
         handle.await.unwrap()
     });
     assert_eq!(result, 42);
@@ -228,9 +226,7 @@ fn test_drop_join_handle_after_completion_drops_output() {
     let tracker = DropTracker::new(Arc::clone(&drop_count));
 
     block_on(async move {
-        let handle = spawn(async move {
-            tracker
-        });
+        let handle = spawn(async move { tracker });
 
         // Let the task run to completion without awaiting the handle.
         yield_now().await;
@@ -253,9 +249,7 @@ fn test_join_handle_consumes_output() {
     let tracker = DropTracker::new(Arc::clone(&drop_count));
 
     block_on(async move {
-        let handle = spawn(async move {
-            tracker
-        });
+        let handle = spawn(async move { tracker });
 
         let received = handle.await.unwrap();
         assert_eq!(drop_count.load(Ordering::SeqCst), 0);
@@ -360,9 +354,7 @@ fn test_nested_block_on_panics() {
 #[test]
 fn test_reactor_integration_poll() {
     let result = block_on(async {
-        let count = crate::reactor::REACTOR.with(|r| {
-            r.borrow_mut().submit_and_poll().unwrap()
-        });
+        let count = crate::reactor::REACTOR.with(|r| r.borrow_mut().submit_and_poll().unwrap());
         assert_eq!(count, 0);
         42
     });
@@ -373,9 +365,7 @@ fn test_reactor_integration_poll() {
 
 #[test]
 fn test_join2_basic() {
-    let result = block_on(async {
-        join2(async { 10 }, async { 20 }).await
-    });
+    let result = block_on(async { join2(async { 10 }, async { 20 }).await });
     assert_eq!(result, (10, 20));
 }
 
@@ -744,9 +734,7 @@ fn test_mpsc_receiver_drop_wakes_blocked_sender() {
         tx.send(1).await.unwrap();
 
         let tx_clone = tx.clone();
-        let handle = spawn(async move {
-            tx_clone.send(2).await
-        });
+        let handle = spawn(async move { tx_clone.send(2).await });
 
         yield_now().await;
         // Drop the receiver while task is blocked waiting for space

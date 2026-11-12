@@ -12,7 +12,7 @@ env:
 
 jobs:
   test:
-    name: Cargo Test All Targets
+    name: Test, fmt, docs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -20,9 +20,22 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
-      - name: Run all-targets test suite
-        run: cargo test --all-targets
+      - name: Run tests (lib, integration, doc)
+        run: cargo test
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build examples and benchmark programs (compile only)
+        run: cargo build --examples --benches
+
+      - name: Rustdoc with warnings as errors
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   clippy:
     name: Clippy All Targets

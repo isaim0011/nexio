@@ -12,11 +12,11 @@
 //! 4. Investigating socket fd leak when TcpListener::accept is dropped.
 //! 5. Investigating socket fd leak when TcpStream::connect is dropped.
 
+use nexio::reactor::slab::{CompletionSlab, ErasedBuf, OpState, PlaceholderBuf};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use nexio::reactor::slab::{CompletionSlab, ErasedBuf, OpState, PlaceholderBuf};
 
 /// A buffer that records its own drop count. Under Miri, any double-drop
 /// will be caught as a use-after-free. We additionally assert the counter
@@ -69,17 +69,28 @@ fn slab_ignore_then_complete_drops_buf_once() {
     slab.ignore(key, boxed);
 
     // Buffer must NOT be dropped yet
-    assert_eq!(drop_count.load(Ordering::SeqCst), 0, "buf dropped too early");
+    assert_eq!(
+        drop_count.load(Ordering::SeqCst),
+        0,
+        "buf dropped too early"
+    );
 
     // 3. CQE arrives
     let waker = slab.complete(key.as_u64(), 0);
     assert!(waker.is_none(), "Ignored op should return no waker");
 
     // Buffer MUST be dropped now
-    assert_eq!(drop_count.load(Ordering::SeqCst), 1, "buf not dropped on CQE");
+    assert_eq!(
+        drop_count.load(Ordering::SeqCst),
+        1,
+        "buf not dropped on CQE"
+    );
 
     // Slot is now freed (subsequent CQE for same key returns None)
-    assert!(slab.complete(key.as_u64(), 0).is_none(), "slot not freed after CQE");
+    assert!(
+        slab.complete(key.as_u64(), 0).is_none(),
+        "slot not freed after CQE"
+    );
 }
 
 // ── Test 2: stale CQE is safely discarded ─────────────────────────────────────
@@ -133,7 +144,10 @@ fn slab_drop_after_cqe_arrived_frees_buf_immediately() {
     // Because the operation already completed, slab.ignore must drop buf and free the slot immediately.
     let boxed: Box<dyn ErasedBuf> = Box::new(buf);
     let still_in_flight = slab.ignore(key, boxed);
-    assert!(!still_in_flight, "completed op should not need ASYNC_CANCEL");
+    assert!(
+        !still_in_flight,
+        "completed op should not need ASYNC_CANCEL"
+    );
     assert_eq!(
         drop_count.load(Ordering::SeqCst),
         1,

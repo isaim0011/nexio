@@ -120,7 +120,8 @@ fn test_ecanceled_vs_completion_race_storm() {
         let mut fds_list = Vec::with_capacity(OPS);
         for _ in 0..OPS {
             let mut fds = [0 as libc::c_int; 2];
-            let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+            let ret =
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
             assert_eq!(ret, 0);
             fds_list.push(fds);
         }
@@ -131,7 +132,12 @@ fn test_ecanceled_vs_completion_race_storm() {
                 if idx % 2 == 0 {
                     let byte = [42u8; 1];
                     unsafe {
-                        libc::send(fd, byte.as_ptr() as *const libc::c_void, 1, libc::MSG_DONTWAIT);
+                        libc::send(
+                            fd,
+                            byte.as_ptr() as *const libc::c_void,
+                            1,
+                            libc::MSG_DONTWAIT,
+                        );
                     }
                 }
             }

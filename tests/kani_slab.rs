@@ -52,7 +52,10 @@ mod kani_harnesses {
         let recovered_gen = (key.generation() as u64) << 32;
 
         kani::assert((recovered_index & recovered_gen) == 0, "bits overlap");
-        kani::assert((recovered_index | recovered_gen) == raw, "bits reconstruction mismatch");
+        kani::assert(
+            (recovered_index | recovered_gen) == raw,
+            "bits reconstruction mismatch",
+        );
     }
 
     // ── Harness 2: out-of-range user_data never panics ────────────────────
@@ -92,7 +95,10 @@ mod kani_harnesses {
         kani::assert(waker.is_none(), "stale CQE returned a waker");
 
         let normal_waker = slab.complete(key.as_u64(), 42);
-        kani::assert(normal_waker.is_none(), "slot was prematurely consumed by stale CQE");
+        kani::assert(
+            normal_waker.is_none(),
+            "slot was prematurely consumed by stale CQE",
+        );
     }
 
     // ── Harness 4: ignore → complete frees slot exactly once ─────────────
@@ -112,7 +118,9 @@ mod kani_harnesses {
     #[kani::unwind(6)]
     fn harness_ignore_then_complete_drops_once() {
         let mut drop_count: u32 = 0;
-        let counter = KaniDropCounter { count: &mut drop_count };
+        let counter = KaniDropCounter {
+            count: &mut drop_count,
+        };
 
         let mut slab = CompletionSlab::with_capacity(4);
         let key = slab.insert(OpState::Submitted {
@@ -155,7 +163,9 @@ mod kani_harnesses {
     #[kani::unwind(6)]
     fn harness_complete_then_ignore_frees_immediately() {
         let mut drop_count: u32 = 0;
-        let counter = KaniDropCounter { count: &mut drop_count };
+        let counter = KaniDropCounter {
+            count: &mut drop_count,
+        };
 
         let mut slab = CompletionSlab::with_capacity(4);
         let key = slab.insert(OpState::Submitted {
@@ -167,7 +177,10 @@ mod kani_harnesses {
         let _ = slab.complete(key.as_u64(), res);
 
         let still_in_flight = slab.ignore(key, Box::new(counter));
-        kani::assert(!still_in_flight, "already-completed op must not stay in flight");
+        kani::assert(
+            !still_in_flight,
+            "already-completed op must not stay in flight",
+        );
         kani::assert(drop_count == 1, "buf must be dropped immediately");
         kani::assert(slab.is_empty(), "slab must be empty");
     }
@@ -184,7 +197,10 @@ mod kani_harnesses {
         });
 
         let waker = std::task::Waker::noop();
-        kani::assert(slab.poll_and_consume(key1, waker).is_none(), "not yet complete");
+        kani::assert(
+            slab.poll_and_consume(key1, waker).is_none(),
+            "not yet complete",
+        );
 
         let cqe_res: i32 = kani::any();
         let _ = slab.complete(key1.as_u64(), cqe_res);
@@ -197,11 +213,17 @@ mod kani_harnesses {
             buf: Box::new(PlaceholderBuf),
         });
         kani::assert(key2.index() == key1.index(), "slot not reused");
-        kani::assert(key2.generation() == key1.generation().wrapping_add(1), "gen not bumped");
+        kani::assert(
+            key2.generation() == key1.generation().wrapping_add(1),
+            "gen not bumped",
+        );
 
         // Stale CQE for key1 must not complete key2
         let _ = slab.complete(key1.as_u64(), 0);
-        kani::assert(slab.poll_and_consume(key2, waker).is_none(), "stale CQE affected key2");
+        kani::assert(
+            slab.poll_and_consume(key2, waker).is_none(),
+            "stale CQE affected key2",
+        );
     }
 
     // ── Harness 8: ignore_accept state transitions ────────────────────────

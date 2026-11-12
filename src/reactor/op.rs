@@ -71,9 +71,7 @@ impl<B: Unpin + Send + 'static> Future for Op<B> {
 
         let key = self.key;
         // Check if reactor already completed this op and consume slot in one borrow.
-        let result = REACTOR.with(|r| {
-            r.borrow_mut().slab.poll_and_consume(key, cx.waker())
-        });
+        let result = REACTOR.with(|r| r.borrow_mut().slab.poll_and_consume(key, cx.waker()));
 
         match result {
             None => Poll::Pending,

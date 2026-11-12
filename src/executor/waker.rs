@@ -109,12 +109,18 @@ mod raw_root_waker {
 
     unsafe fn drop_root(_data: *const ()) {}
 
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone_root, wake_root, wake_root, drop_root);
+    static VTABLE: RawWakerVTable =
+        RawWakerVTable::new(clone_root, wake_root, wake_root, drop_root);
 
     #[inline]
     pub(super) fn into_waker() -> Waker {
         // SAFETY: VTABLE functions uphold RawWaker contract and never dereference `data`.
-        unsafe { Waker::from_raw(RawWaker::new(NonNull::<u8>::dangling().as_ptr().cast(), &VTABLE)) }
+        unsafe {
+            Waker::from_raw(RawWaker::new(
+                NonNull::<u8>::dangling().as_ptr().cast(),
+                &VTABLE,
+            ))
+        }
     }
 }
 

@@ -111,12 +111,57 @@ Do what the incumbents conspicuously don't:
 
 ## Phase 3 — only with profiling evidence, not before
 
-- [x] Registered buffers/files, SQPOLL as an opt-in (never default)
-      mode via `ReactorBuilder` (`register_buffers`, `read_fixed`,
-      `write_fixed`, `register_files`); multishot accept/recv remains
-      future work
-- [ ] Cross-platform fallback (Windows/macOS), once Linux is sound —
-      a compio-parity goal, not a v0 goal
+- [x] Registered buffers/files and SQPOLL exist as opt-in `ReactorBuilder` options (`register_buffers`,
+      `read_fixed`, `write_fixed`, `register_files`, SQPOLL); none is on by default
+- [x] Multishot accept/recv: **measured and rejected** (see below); not implemented in nexio
+- [ ] Cross-platform fallback (Windows/macOS): not started; nexio refuses to compile off Linux with a clear error
+
+## Measured and rejected (details and raw numbers in `reports/split_benchmark_results.md`)
+
+Every item was tried against the same Oracle VM with a byte-verifying client and reported whether it
+helped or not. None of these reached 2x; TCP cost is ~93% kernel.
+
+- **Registered buffers (single region):** ~3% *worse* than plain buffers on TCP echo
+- **Multishot accept + recv with a provided-buffer ring:** CPU tie, throughput ~2-3% lower
+- **Zero-copy send (`SendZc`):** slower at every size tested up to 256 KB on loopback
+- **Batched sends (one `io_uring_enter` per N):** ~10% less CPU per delivery when fanning out to 1,000 sockets
+- **`COOP_TASKRUN` + `DEFER_TASKRUN`:** ~5% more throughput; kept on by default
+- **Kernel bypass (AF_XDP), raw UDP, both sides:** 3.4x packets/s on a virtual NIC in copy mode, not
+  transferable to TCP; a user-space TCP stack on top (`utcp/`, experimental) was byte-correct against
+  Linux TCP but not cheaper per message than nexio. Not part of nexio.
+
+## Phase 4 — usable by other people
+
+Done:
+- [x] User-facing README with an honest performance section and an explicit limits section
+- [x] Runnable examples (`echo_server`, `echo_server_multicore`, `file_and_timeout`)
+- [x] `run_sharded`: one pinned reactor per core in one call
+- [x] Package metadata, source-file excludes, `cargo publish --dry-run` clean
+- [x] Clear compile error on non-Linux targets
+- [x] Repo cleanup (stale scaffold removed, duplicate scripts removed)
+
+Open, in priority order:
+- [ ] **Kernel matrix:** run the full test suite on 5.15 (Ubuntu 22.04 LTS) and 6.1; the README only
+      claims 6.12 until this is done
+- [x] CI on every push: tests, fmt, rustdoc `-D warnings`, clippy `-D warnings`, Miri, Kani, benchmark
+      smoke check. It was red on every push until this commit (the test job also ran the standalone
+      benchmark programs, and clippy tripped on one of them); fixed, and confirming green is tracked
+      by the next push's run
+- [ ] **Public API review and docs pass** before 1.0 (the crate is `#![warn(missing_docs)]` already);
+      decide the stability promise
+- [ ] **Fuzzing** the frame/slab paths with real inputs, not only Kani/Miri
+- [ ] **Soak test:** hours-long run with connection churn and cancellations, watching for fd and memory leaks
+- [ ] Publish to crates.io and make the repository public (needs the owner's explicit go-ahead)
+
+## Phase 5 — features users will ask for
+
+None started. Listed so nobody assumes they exist:
+- [ ] Async hostname resolution (today `bind`/`connect` with a hostname block on the std resolver)
+- [ ] Unix-domain sockets
+- [ ] Signal handling, process spawning
+- [ ] TLS integration story (an adapter crate, not part of the core)
+- [ ] An optional compatibility layer for tokio-style `AsyncRead`/`AsyncWrite`
+- [ ] Cross-platform fallback backend (see Phase 3)
 
 ## What "beating" tokio/compio/monoio actually means here
 

@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     buf::{BufResult, IoBuf, IoBufMut},
-    net::{socket_addr_to_storage, sockaddr_storage_to_addr, CloseOnDrop},
+    net::{sockaddr_storage_to_addr, socket_addr_to_storage, CloseOnDrop},
     reactor::REACTOR,
 };
 
@@ -36,7 +36,10 @@ impl UdpSocket {
             }
         }
         Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
         }))
     }
 
@@ -91,13 +94,7 @@ impl UdpSocket {
 
         // Bind address
         let (storage, socklen) = socket_addr_to_storage(addr);
-        let ret = unsafe {
-            libc::bind(
-                fd,
-                &storage as *const _ as *const libc::sockaddr,
-                socklen,
-            )
-        };
+        let ret = unsafe { libc::bind(fd, &storage as *const _ as *const libc::sockaddr, socklen) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -128,20 +125,18 @@ impl UdpSocket {
             }
         }
         Err(last_err.unwrap_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "could not resolve to any address",
+            )
         }))
     }
 
     /// Connect directly to a resolved `SocketAddr`.
     pub fn connect_addr(&self, addr: SocketAddr) -> io::Result<()> {
         let (storage, len) = socket_addr_to_storage(addr);
-        let ret = unsafe {
-            libc::connect(
-                self.fd,
-                &storage as *const _ as *const libc::sockaddr,
-                len,
-            )
-        };
+        let ret =
+            unsafe { libc::connect(self.fd, &storage as *const _ as *const libc::sockaddr, len) };
         if ret == 0 {
             Ok(())
         } else {
@@ -238,7 +233,8 @@ impl UdpSocket {
         B: IoBuf + Send + Unpin + 'static,
     {
         let key = match REACTOR.with(|r| unsafe {
-            r.borrow_mut().submit_sendmsg(self.fd, &buf, Some(target), 0)
+            r.borrow_mut()
+                .submit_sendmsg(self.fd, &buf, Some(target), 0)
         }) {
             Ok(k) => k,
             Err(e) => return (Err(e), buf),

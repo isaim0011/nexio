@@ -178,8 +178,6 @@ impl<T: 'static> Drop for JoinSet<T> {
 
 impl<T: 'static> std::fmt::Debug for JoinSet<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JoinSet")
-            .field("len", &self.len())
-            .finish()
+        f.debug_struct("JoinSet").field("len", &self.len()).finish()
     }
 }

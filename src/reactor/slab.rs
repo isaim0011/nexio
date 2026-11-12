@@ -168,7 +168,7 @@ impl MsgHdrData {
 /// ```
 pub enum OpState {
     /// Op is in-flight. Waker is updated each time the Future is polled.
-    /// buf is a PlaceholderBuf for normal ops (real buf is in Op<B>::buf).
+    /// buf is a PlaceholderBuf for normal ops (real buf is in `Op<B>::buf`).
     /// For Ignored ops the real buf is moved here.
     Submitted {
         /// Optional waker registered when the future is polled.
@@ -384,7 +384,10 @@ impl CompletionSlab {
         if let Some(entry) = self.inner.get_mut(index) {
             if entry.generation == key.generation() {
                 match &mut entry.state {
-                    OpState::Submitted { buf: ref mut prev_buf, .. } => {
+                    OpState::Submitted {
+                        buf: ref mut prev_buf,
+                        ..
+                    } => {
                         let old_buf = std::mem::replace(prev_buf, Box::new(PlaceholderBuf));
                         entry.state = OpState::Ignored {
                             buf,

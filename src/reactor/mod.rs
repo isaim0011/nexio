@@ -178,13 +178,9 @@ impl Reactor {
     where
         B: crate::buf::IoBuf + Send + 'static,
     {
-        let sqe = opcode::Write::new(
-            types::Fd(fd),
-            buf.stable_ptr(),
-            buf.bytes_init() as u32,
-        )
-        .offset(offset)
-        .build();
+        let sqe = opcode::Write::new(types::Fd(fd), buf.stable_ptr(), buf.bytes_init() as u32)
+            .offset(offset)
+            .build();
 
         let key = self.slab.insert(OpState::Submitted {
             waker,
@@ -237,12 +233,8 @@ impl Reactor {
     where
         B: crate::buf::IoBuf + Send + 'static,
     {
-        let sqe = opcode::Send::new(
-            types::Fd(fd),
-            buf.stable_ptr(),
-            buf.bytes_init() as u32,
-        )
-        .build();
+        let sqe =
+            opcode::Send::new(types::Fd(fd), buf.stable_ptr(), buf.bytes_init() as u32).build();
 
         let key = self.slab.insert(OpState::Submitted {
             waker,
@@ -260,12 +252,8 @@ impl Reactor {
             buf: Box::new(slab::CloseOnDropFd),
         });
 
-        let sqe = opcode::Accept::new(
-            types::Fd(fd),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-        .build();
+        let sqe =
+            opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut()).build();
 
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -360,12 +348,7 @@ impl Reactor {
             Some(a) => socket_addr_to_libc(a),
             None => (unsafe { std::mem::zeroed() }, 0),
         };
-        let msg_data = slab::MsgHdrData::new_send(
-            storage,
-            len,
-            buf.stable_ptr(),
-            buf.bytes_init(),
-        );
+        let msg_data = slab::MsgHdrData::new_send(storage, len, buf.stable_ptr(), buf.bytes_init());
         let ptr = msg_data.as_msghdr_ptr();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
@@ -389,10 +372,7 @@ impl Reactor {
     where
         B: crate::buf::IoBufMut + Send + 'static,
     {
-        let mut msg_data = slab::MsgHdrData::new_recv(
-            buf.stable_ptr_mut(),
-            buf.bytes_total(),
-        );
+        let mut msg_data = slab::MsgHdrData::new_recv(buf.stable_ptr_mut(), buf.bytes_total());
         let ptr = msg_data.as_msghdr_mut_ptr();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
@@ -622,12 +602,7 @@ impl Reactor {
     }
 
     /// Start an asynchronous recvmsg operation on `fd`.
-    pub fn recvmsg<B>(
-        &mut self,
-        fd: RawFd,
-        mut buf: B,
-        flags: u32,
-    ) -> io::Result<Op<B>>
+    pub fn recvmsg<B>(&mut self, fd: RawFd, mut buf: B, flags: u32) -> io::Result<Op<B>>
     where
         B: crate::buf::IoBufMut + Send + 'static,
     {
@@ -636,12 +611,7 @@ impl Reactor {
     }
 
     /// Start an asynchronous UDP send_to operation to `addr`.
-    pub fn send_to<B>(
-        &mut self,
-        fd: RawFd,
-        buf: B,
-        addr: SocketAddr,
-    ) -> io::Result<Op<B>>
+    pub fn send_to<B>(&mut self, fd: RawFd, buf: B, addr: SocketAddr) -> io::Result<Op<B>>
     where
         B: crate::buf::IoBuf + Send + 'static,
     {
@@ -649,11 +619,7 @@ impl Reactor {
     }
 
     /// Start an asynchronous UDP recv_from operation.
-    pub fn recv_from<B>(
-        &mut self,
-        fd: RawFd,
-        buf: B,
-    ) -> io::Result<Op<B>>
+    pub fn recv_from<B>(&mut self, fd: RawFd, buf: B) -> io::Result<Op<B>>
     where
         B: crate::buf::IoBufMut + Send + 'static,
     {
@@ -881,7 +847,8 @@ mod tests {
 
         // Create a socketpair: pair[0] simulates the accepted socket
         let mut pair = [0 as libc::c_int; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, pair.as_mut_ptr()) };
         assert_eq!(ret, 0);
 
         // CQE arrives for the ignored accept
@@ -892,7 +859,10 @@ mod tests {
         // If pair[0] was closed, sending on pair[1] must return EPIPE (peer shutdown).
         let byte = [1u8];
         let sent = unsafe { libc::send(pair[1], byte.as_ptr() as *const _, 1, libc::MSG_NOSIGNAL) };
-        assert_eq!(sent, -1, "pair[0] should have been closed on ignored completion");
+        assert_eq!(
+            sent, -1,
+            "pair[0] should have been closed on ignored completion"
+        );
         let err = io::Error::last_os_error();
         assert_eq!(err.raw_os_error(), Some(libc::EPIPE));
 
@@ -904,7 +874,8 @@ mod tests {
     #[test]
     fn test_reactor_real_pipe_io() {
         let mut fds = [0 as libc::c_int; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0);
 
         let write_buf = vec![1, 2, 3, 4, 5, 6, 7, 8];
@@ -958,7 +929,8 @@ mod tests {
     #[test]
     fn test_reactor_with_entries_forcing_sq_full() {
         let mut fds = [0 as libc::c_int; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0);
 
         let mut reactor = Reactor::with_entries(4).expect("failed to create 4-entry reactor");
@@ -985,7 +957,11 @@ mod tests {
         let waker = std::task::Waker::from(std::sync::Arc::new(DummyWake));
         for op in &ops {
             let res = reactor.slab.poll_result(op.key(), &waker);
-            assert_eq!(res, Some(4), "each write should have completed with 4 bytes");
+            assert_eq!(
+                res,
+                Some(4),
+                "each write should have completed with 4 bytes"
+            );
         }
 
         // Prevent Op::drop from querying the global REACTOR
@@ -1004,13 +980,19 @@ mod tests {
         match ReactorBuilder::new().sqpoll(Some(50)).build() {
             Ok(mut reactor) => {
                 let mut fds = [0 as libc::c_int; 2];
-                let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+                let ret = unsafe {
+                    libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr())
+                };
                 assert_eq!(ret, 0);
 
                 let write_buf = vec![42u8; 4];
-                let _write_op = reactor.write(fds[0], write_buf, 0).expect("write submit failed");
+                let _write_op = reactor
+                    .write(fds[0], write_buf, 0)
+                    .expect("write submit failed");
                 let read_buf = vec![0u8; 4];
-                let _read_op = reactor.read(fds[1], read_buf, 0).expect("read submit failed");
+                let _read_op = reactor
+                    .read(fds[1], read_buf, 0)
+                    .expect("read submit failed");
 
                 let mut ready = 0;
                 for _ in 0..100 {
@@ -1031,7 +1013,10 @@ mod tests {
                     libc::close(fds[1]);
                 }
             }
-            Err(e) if e.raw_os_error() == Some(libc::EPERM) || e.raw_os_error() == Some(libc::EACCES) => {
+            Err(e)
+                if e.raw_os_error() == Some(libc::EPERM)
+                    || e.raw_os_error() == Some(libc::EACCES) =>
+            {
                 // Gracefully skipped: kernel or environment requires CAP_SYS_NICE / root for SQPOLL
                 eprintln!("Skipping SQPOLL test: insufficient privileges ({:?})", e);
             }
@@ -1143,11 +1128,8 @@ mod tests {
         }
 
         // 5. Close
-        let mut close_op = REACTOR.with(|r| {
-            r.borrow_mut()
-                .close(fd)
-                .expect("close submission failed")
-        });
+        let mut close_op =
+            REACTOR.with(|r| r.borrow_mut().close(fd).expect("close submission failed"));
         loop {
             if let std::task::Poll::Ready(res) = Pin::new(&mut close_op).poll(&mut cx) {
                 assert!(res.is_ok(), "close failed: {:?}", res);
@@ -1168,7 +1150,8 @@ mod tests {
     #[test]
     fn test_register_buffers_read_write_fixed() {
         let mut fds = [0 as libc::c_int; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0);
 
         let mut buf1 = vec![0u8; 16];
@@ -1186,12 +1169,10 @@ mod tests {
             },
         ];
 
-        REACTOR.with(|r| {
-            unsafe {
-                r.borrow()
-                    .register_buffers(&iovecs)
-                    .expect("register_buffers failed");
-            }
+        REACTOR.with(|r| unsafe {
+            r.borrow()
+                .register_buffers(&iovecs)
+                .expect("register_buffers failed");
         });
 
         let waker = std::task::Waker::from(std::sync::Arc::new(DummyWake));
@@ -1284,9 +1265,8 @@ mod tests {
 
         // Get dynamically assigned port
         let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-        let ret = unsafe {
-            libc::getsockname(fd2, &mut addr as *mut _ as *mut libc::sockaddr, &mut len)
-        };
+        let ret =
+            unsafe { libc::getsockname(fd2, &mut addr as *mut _ as *mut libc::sockaddr, &mut len) };
         assert_eq!(ret, 0);
         let target_port = u16::from_be(addr.sin_port);
         let target_addr: std::net::SocketAddr =
@@ -1341,7 +1321,8 @@ mod tests {
     #[test]
     fn test_reactor_real_cancel_on_drop() {
         let mut fds = [0 as libc::c_int; 2];
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0);
 
         let drop_count = Arc::new(AtomicUsize::new(0));

@@ -44,7 +44,13 @@ struct Conn {
 fn nodelay(fd: i32) {
     let one: libc::c_int = 1;
     unsafe {
-        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, 4);
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            &one as *const _ as *const _,
+            4,
+        );
     }
 }
 
@@ -86,7 +92,10 @@ fn main() {
     let mut pool: Vec<u8> = Vec::new();
     if mode == "fixed" {
         pool = vec![0u8; MAX_CONNS * size];
-        let iov = [libc::iovec { iov_base: pool.as_mut_ptr() as *mut _, iov_len: pool.len() }];
+        let iov = [libc::iovec {
+            iov_base: pool.as_mut_ptr() as *mut _,
+            iov_len: pool.len(),
+        }];
         unsafe { ring.submitter().register_buffers(&iov).unwrap() };
     }
 
@@ -109,7 +118,11 @@ fn main() {
         };
         assert!(p != libc::MAP_FAILED);
         br_base = p as *mut types::BufRingEntry;
-        unsafe { ring.submitter().register_buf_ring(br_base as u64, MAX_CONNS as u16, BGID).unwrap() };
+        unsafe {
+            ring.submitter()
+                .register_buf_ring(br_base as u64, MAX_CONNS as u16, BGID)
+                .unwrap()
+        };
         for bid in 0..MAX_CONNS {
             unsafe {
                 let e = &mut *br_base.add(bid);
@@ -119,7 +132,10 @@ fn main() {
             }
         }
         br_tail = MAX_CONNS as u16;
-        unsafe { (*(types::BufRingEntry::tail(br_base) as *const AtomicU16)).store(br_tail, Ordering::Release) };
+        unsafe {
+            (*(types::BufRingEntry::tail(br_base) as *const AtomicU16))
+                .store(br_tail, Ordering::Release)
+        };
     }
     let give_back = |bid: u16, tail: &mut u16| unsafe {
         let e = &mut *br_base.add((*tail as usize) & (MAX_CONNS - 1));
@@ -132,9 +148,13 @@ fn main() {
 
     let arm_accept = |ring: &mut IoUring| {
         let e = if mode == "multi" {
-            opcode::AcceptMulti::new(lfd).build().user_data(ud(ACCEPT, 0))
+            opcode::AcceptMulti::new(lfd)
+                .build()
+                .user_data(ud(ACCEPT, 0))
         } else {
-            opcode::Accept::new(lfd, std::ptr::null_mut(), std::ptr::null_mut()).build().user_data(ud(ACCEPT, 0))
+            opcode::Accept::new(lfd, std::ptr::null_mut(), std::ptr::null_mut())
+                .build()
+                .user_data(ud(ACCEPT, 0))
         };
         push(ring, &e);
     };
@@ -155,7 +175,10 @@ fn main() {
     loop {
         ring.submit_and_wait(1).unwrap();
         batch.clear();
-        batch.extend(ring.completion().map(|c| (c.user_data(), c.result(), c.flags())));
+        batch.extend(
+            ring.completion()
+                .map(|c| (c.user_data(), c.result(), c.flags())),
+        );
         for &(u, res, flags) in &batch {
             let (kind, id) = (u >> 32, (u & 0xffff_ffff) as usize);
             match kind {
@@ -166,10 +189,26 @@ fn main() {
                             continue;
                         };
                         nodelay(res);
-                        let mut buf = if mode == "fixed" { Vec::new() } else { vec![0u8; if mode == "multi" { 0 } else { size }] };
-                        let ptr = if mode == "fixed" { unsafe { pool.as_mut_ptr().add(slot * size) } } else { buf.as_mut_ptr() };
-                        conns[slot] = Some(Conn { fd: res, buf: std::mem::take(&mut buf), pending_bid: 0 });
-                        let ptr = if mode == "base" { conns[slot].as_mut().unwrap().buf.as_mut_ptr() } else { ptr };
+                        let mut buf = if mode == "fixed" {
+                            Vec::new()
+                        } else {
+                            vec![0u8; if mode == "multi" { 0 } else { size }]
+                        };
+                        let ptr = if mode == "fixed" {
+                            unsafe { pool.as_mut_ptr().add(slot * size) }
+                        } else {
+                            buf.as_mut_ptr()
+                        };
+                        conns[slot] = Some(Conn {
+                            fd: res,
+                            buf: std::mem::take(&mut buf),
+                            pending_bid: 0,
+                        });
+                        let ptr = if mode == "base" {
+                            conns[slot].as_mut().unwrap().buf.as_mut_ptr()
+                        } else {
+                            ptr
+                        };
                         arm_recv(&mut ring, slot, res, ptr);
                     }
                     if mode != "multi" || !cqueue::more(flags) {
@@ -177,7 +216,9 @@ fn main() {
                     }
                 }
                 RECV => {
-                    let Some(c) = conns[id].as_mut() else { continue };
+                    let Some(c) = conns[id].as_mut() else {
+                        continue;
+                    };
                     if res <= 0 {
                         if mode != "multi" || !cqueue::more(flags) {
                             unsafe { libc::close(c.fd) };
@@ -188,7 +229,13 @@ fn main() {
                     }
                     let f = types::Fd(c.fd);
                     let e = match mode {
-                        "fixed" => opcode::WriteFixed::new(f, unsafe { pool.as_mut_ptr().add(id * size) }, res as u32, 0).build(),
+                        "fixed" => opcode::WriteFixed::new(
+                            f,
+                            unsafe { pool.as_mut_ptr().add(id * size) },
+                            res as u32,
+                            0,
+                        )
+                        .build(),
                         "multi" => {
                             let bid = cqueue::buffer_select(flags).expect("buffer id");
                             c.pending_bid = bid;
@@ -203,7 +250,9 @@ fn main() {
                     }
                 }
                 SEND => {
-                    let Some(c) = conns[id].as_mut() else { continue };
+                    let Some(c) = conns[id].as_mut() else {
+                        continue;
+                    };
                     if mode == "multi" {
                         give_back(c.pending_bid, &mut br_tail);
                     }

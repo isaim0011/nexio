@@ -305,7 +305,10 @@ impl OpenOptions {
             flags |= libc::O_CREAT;
         }
 
-        let op = REACTOR.with(|r| r.borrow_mut().openat(libc::AT_FDCWD, &cpath, flags, self.mode))?;
+        let op = REACTOR.with(|r| {
+            r.borrow_mut()
+                .openat(libc::AT_FDCWD, &cpath, flags, self.mode)
+        })?;
         let fd = op.await?;
         Ok(File { fd })
     }
@@ -319,7 +322,8 @@ mod tests {
     #[test]
     fn test_file_write_read_sync_close() {
         block_on(async {
-            let path = std::env::temp_dir().join(format!("nexio_fs_test_{}.bin", std::process::id()));
+            let path =
+                std::env::temp_dir().join(format!("nexio_fs_test_{}.bin", std::process::id()));
             let _ = std::fs::remove_file(&path);
 
             let file = OpenOptions::new()

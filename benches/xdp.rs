@@ -47,7 +47,10 @@ fn send(ip: &str, port: u16, secs: u64) {
         let payload = [0x37u8; PAYLOAD];
         const B: usize = 64;
         let mut iov: Vec<libc::iovec> = (0..B)
-            .map(|_| libc::iovec { iov_base: payload.as_ptr() as *mut _, iov_len: PAYLOAD })
+            .map(|_| libc::iovec {
+                iov_base: payload.as_ptr() as *mut _,
+                iov_len: PAYLOAD,
+            })
             .collect();
         let mut msgs: Vec<libc::mmsghdr> = (0..B)
             .map(|i| {
@@ -77,19 +80,44 @@ fn recv_udp(port: u16) {
     unsafe {
         let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         let big: libc::c_int = 16 << 20;
-        libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_RCVBUF, &big as *const _ as *const _, 4);
-        let tv = libc::timeval { tv_sec: 1, tv_usec: 0 };
-        libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const _, 16);
+        libc::setsockopt(
+            s,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &big as *const _ as *const _,
+            4,
+        );
+        let tv = libc::timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
+        libc::setsockopt(
+            s,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const _,
+            16,
+        );
         let mut addr: libc::sockaddr_in = std::mem::zeroed();
         addr.sin_family = libc::AF_INET as u16;
         addr.sin_port = port.to_be();
-        if libc::bind(s, &addr as *const _ as *const _, std::mem::size_of::<libc::sockaddr_in>() as u32) < 0 {
+        if libc::bind(
+            s,
+            &addr as *const _ as *const _,
+            std::mem::size_of::<libc::sockaddr_in>() as u32,
+        ) < 0
+        {
             die("bind");
         }
         const B: usize = 64;
         let mut bufs = vec![[0u8; 2048]; B];
-        let mut iov: Vec<libc::iovec> =
-            bufs.iter_mut().map(|b| libc::iovec { iov_base: b.as_mut_ptr() as *mut _, iov_len: 2048 }).collect();
+        let mut iov: Vec<libc::iovec> = bufs
+            .iter_mut()
+            .map(|b| libc::iovec {
+                iov_base: b.as_mut_ptr() as *mut _,
+                iov_len: 2048,
+            })
+            .collect();
         let mut msgs: Vec<libc::mmsghdr> = (0..B)
             .map(|i| {
                 let mut m: libc::mmsghdr = std::mem::zeroed();
@@ -104,7 +132,13 @@ fn recv_udp(port: u16) {
         let mut last = Instant::now();
         let cpu0 = thread_cpu();
         loop {
-            let n = libc::recvmmsg(s, msgs.as_mut_ptr(), B as u32, libc::MSG_WAITFORONE, std::ptr::null_mut());
+            let n = libc::recvmmsg(
+                s,
+                msgs.as_mut_ptr(),
+                B as u32,
+                libc::MSG_WAITFORONE,
+                std::ptr::null_mut(),
+            );
             if n <= 0 {
                 if first.is_some() {
                     break;
@@ -129,7 +163,10 @@ fn thread_cpu() -> Duration {
 }
 
 fn report(name: &str, count: u64, first: Option<Instant>, last: Instant, cpu: Duration) {
-    let dur = first.map(|f| last.duration_since(f)).unwrap_or_default().as_secs_f64();
+    let dur = first
+        .map(|f| last.duration_since(f))
+        .unwrap_or_default()
+        .as_secs_f64();
     println!(
         "{name} delivered={count} window_s={dur:.3} pps={:.0} recv_thread_cpu_s={:.2}",
         count as f64 / dur.max(1e-9),
@@ -208,12 +245,42 @@ fn recv_xsk(ifname: &str) {
         }
 
         let prog = [
-            Insn { code: 0x61, regs: 0x12, off: 16, imm: 0 }, // r2 = *(u32*)(r1 + 16)  rx_queue_index
-            Insn { code: 0x18, regs: 0x11, off: 0, imm: map_fd as i32 }, // r1 = map (pseudo map fd)
-            Insn { code: 0, regs: 0, off: 0, imm: 0 },
-            Insn { code: 0xb7, regs: 0x03, off: 0, imm: 2 }, // r3 = XDP_PASS (fallback)
-            Insn { code: 0x85, regs: 0, off: 0, imm: 51 },   // call bpf_redirect_map
-            Insn { code: 0x95, regs: 0, off: 0, imm: 0 },    // exit
+            Insn {
+                code: 0x61,
+                regs: 0x12,
+                off: 16,
+                imm: 0,
+            }, // r2 = *(u32*)(r1 + 16)  rx_queue_index
+            Insn {
+                code: 0x18,
+                regs: 0x11,
+                off: 0,
+                imm: map_fd as i32,
+            }, // r1 = map (pseudo map fd)
+            Insn {
+                code: 0,
+                regs: 0,
+                off: 0,
+                imm: 0,
+            },
+            Insn {
+                code: 0xb7,
+                regs: 0x03,
+                off: 0,
+                imm: 2,
+            }, // r3 = XDP_PASS (fallback)
+            Insn {
+                code: 0x85,
+                regs: 0,
+                off: 0,
+                imm: 51,
+            }, // call bpf_redirect_map
+            Insn {
+                code: 0x95,
+                regs: 0,
+                off: 0,
+                imm: 0,
+            }, // exit
         ];
         let license = CString::new("GPL").unwrap();
         let mut log = vec![0u8; 8192];
@@ -262,7 +329,14 @@ fn recv_xsk(ifname: &str) {
         }
         let mut off = MmapOffsets::default();
         let mut len = std::mem::size_of::<MmapOffsets>() as u32;
-        if libc::getsockopt(xsk, SOL_XDP, XDP_MMAP_OFFSETS, &mut off as *mut _ as *mut _, &mut len) < 0 {
+        if libc::getsockopt(
+            xsk,
+            SOL_XDP,
+            XDP_MMAP_OFFSETS,
+            &mut off as *mut _ as *mut _,
+            &mut len,
+        ) < 0
+        {
             die("XDP_MMAP_OFFSETS");
         }
         let rx_map = libc::mmap(
@@ -339,7 +413,10 @@ fn recv_xsk(ifname: &str) {
             let avail = prod.wrapping_sub(cons);
             if avail == 0 {
                 idle_spins += 1;
-                if first.is_some() && idle_spins % 1_000_000 == 0 && last.elapsed() > Duration::from_secs(1) {
+                if first.is_some()
+                    && idle_spins % 1_000_000 == 0
+                    && last.elapsed() > Duration::from_secs(1)
+                {
                     break;
                 }
                 std::hint::spin_loop();
@@ -427,7 +504,11 @@ fn send_xsk(ifname: &str, secs: u64) {
         }
         let frame = build_frame();
         for i in 0..FRAMES {
-            std::ptr::copy_nonoverlapping(frame.as_ptr(), (umem as *mut u8).add(i * CHUNK), frame.len());
+            std::ptr::copy_nonoverlapping(
+                frame.as_ptr(),
+                (umem as *mut u8).add(i * CHUNK),
+                frame.len(),
+            );
         }
         let xsk = libc::socket(AF_XDP, libc::SOCK_RAW, 0);
         if xsk < 0 {
@@ -448,7 +529,14 @@ fn send_xsk(ifname: &str, secs: u64) {
         }
         let mut off = MmapOffsets::default();
         let mut len = std::mem::size_of::<MmapOffsets>() as u32;
-        if libc::getsockopt(xsk, SOL_XDP, XDP_MMAP_OFFSETS, &mut off as *mut _ as *mut _, &mut len) < 0 {
+        if libc::getsockopt(
+            xsk,
+            SOL_XDP,
+            XDP_MMAP_OFFSETS,
+            &mut off as *mut _ as *mut _,
+            &mut len,
+        ) < 0
+        {
             die("XDP_MMAP_OFFSETS");
         }
         let tx_map = libc::mmap(
@@ -493,12 +581,20 @@ fn send_xsk(ifname: &str, secs: u64) {
             let free = RING as u32 - prod.wrapping_sub(cons);
             let batch = free.min(64);
             for _ in 0..batch {
-                *tx_desc.add((prod as usize) & (RING - 1)) = [(next_frame * CHUNK) as u64, frame.len() as u64];
+                *tx_desc.add((prod as usize) & (RING - 1)) =
+                    [(next_frame * CHUNK) as u64, frame.len() as u64];
                 next_frame = (next_frame + 1) % FRAMES;
                 prod = prod.wrapping_add(1);
             }
             tp.store(prod, Ordering::Release);
-            libc::sendto(xsk, std::ptr::null(), 0, libc::MSG_DONTWAIT, std::ptr::null(), 0);
+            libc::sendto(
+                xsk,
+                std::ptr::null(),
+                0,
+                libc::MSG_DONTWAIT,
+                std::ptr::null(),
+                0,
+            );
             kicks += 1;
             // reap completions so the kernel can keep reserving completion slots
             cc.store(cp.load(Ordering::Acquire), Ordering::Release);
@@ -518,15 +614,26 @@ fn main() {
     match a.get(1).map(String::as_str) {
         Some("send-xsk") => {
             pin(1);
-            send_xsk(a.get(2).map(String::as_str).unwrap_or("va"), a.get(3).and_then(|s| s.parse().ok()).unwrap_or(5));
+            send_xsk(
+                a.get(2).map(String::as_str).unwrap_or("va"),
+                a.get(3).and_then(|s| s.parse().ok()).unwrap_or(5),
+            );
         }
         Some("send") => {
             pin(1);
-            send(&a[2], a[3].parse().unwrap_or(PORT_DEFAULT), a[4].parse().unwrap_or(5));
+            send(
+                &a[2],
+                a[3].parse().unwrap_or(PORT_DEFAULT),
+                a[4].parse().unwrap_or(5),
+            );
         }
         Some("recv-udp") => {
             pin(0);
-            recv_udp(a.get(2).and_then(|p| p.parse().ok()).unwrap_or(PORT_DEFAULT));
+            recv_udp(
+                a.get(2)
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(PORT_DEFAULT),
+            );
         }
         Some("recv-xsk") => {
             pin(0);

@@ -20,12 +20,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs, unreachable_pub)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("nexio is built on io_uring and only supports Linux");
+
 pub mod buf;
 pub mod executor;
 pub mod fs;
 pub mod net;
 pub mod reactor;
+mod shard;
 pub mod time;
 
 pub use executor::{block_on, join2, select2, spawn, yield_now, JoinSet};
 pub use reactor::Reactor;
+pub use shard::run_sharded;

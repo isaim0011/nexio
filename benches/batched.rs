@@ -49,7 +49,8 @@ fn main() {
     let per_task = total / qd;
     let total = per_task * qd;
 
-    let path: PathBuf = std::env::temp_dir().join(format!("nexio_batched_{}.dat", std::process::id()));
+    let path: PathBuf =
+        std::env::temp_dir().join(format!("nexio_batched_{}.dat", std::process::id()));
     std::fs::write(&path, vec![0xA5u8; FILE_BYTES]).unwrap();
     let offs = offsets(total, size);
 
