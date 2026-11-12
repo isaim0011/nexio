@@ -48,3 +48,7 @@ harness = false
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[[bench]]
+name = "batched"
+harness = false

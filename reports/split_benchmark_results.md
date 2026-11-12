@@ -58,3 +58,20 @@ concurrency and reports nexio +16% over tokio_sharded. Its own table shows compi
 the +16% compares against the weakest tokio run (tokio_unsharded was 77,713). Those throughput
 numbers were also client-limited. It also labels the VPS as Frankfurt; the VCN is in
 ap-singapore-1. Use this report's numbers instead.
+
+## Batched small ops (`benches/batched.rs`)
+
+Page-cache resident 16 MiB file, 1,000,000 random reads, one process per backend pinned to a single
+core, 4 runs each. Queue depth is the number of concurrent tasks issuing reads, so submissions can be
+batched per `io_uring_enter`.
+
+| Config | nexio | monoio | compio |
+|:---|---:|---:|---:|
+| QD 128, 512 B reads | 1.455-1.479M IOPS (0.67-0.68 us/op) | 1.357-1.465M (0.68-0.73 us/op) | 1.268-1.338M (0.74-0.79 us/op) |
+| QD 512, 64 B reads | 1.438-1.471M IOPS (0.68-0.69 us/op) | 1.407-1.438M (0.69-0.71 us/op) | 1.282-1.307M (0.76-0.78 us/op) |
+
+Nexio is about 12% ahead of compio and level with or slightly ahead of monoio (0-7%). The per-op
+cost sits near 0.68 us for every runtime, which is mostly the kernel read path, so batching
+cannot produce 2x here either. The honest summary across all workloads measured: nexio is at the
+front of the io_uring pack by single-digit to low-double-digit percentages, and far ahead of tokio
+only where tokio falls back to a blocking thread pool (file I/O).
