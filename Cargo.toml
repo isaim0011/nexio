@@ -52,3 +52,7 @@ codegen-units = 1
 [[bench]]
 name = "batched"
 harness = false
+
+[[bench]]
+name = "zc"
+harness = false

@@ -75,3 +75,25 @@ cost sits near 0.68 us for every runtime, which is mostly the kernel read path, 
 cannot produce 2x here either. The honest summary across all workloads measured: nexio is at the
 front of the io_uring pack by single-digit to low-double-digit percentages, and far ahead of tokio
 only where tokio falls back to a blocking thread pool (file I/O).
+
+## Zero-copy sends (`benches/zc.rs`, standalone, not integrated into nexio)
+
+Plain `Send` versus `SendZc` (IORING_OP_SEND_ZC) straight on the `io-uring` crate, loopback TCP,
+sender on core 0 and a blocking receiver on core 1, queue depth 1, 400 MB per run, 3 runs each
+(runs agree within 2%).
+
+| Message size | Send MB/s | SendZc MB/s | Send CPU/msg | SendZc CPU/msg |
+|---:|---:|---:|---:|---:|
+| 4 KB | 436-478 | 208 | 5.6-6.1 us | 7.5 us |
+| 16 KB | ~1,640 | ~750 | 6.6 us | 7.7 us |
+| 64 KB | ~3,000 | ~2,225 | 11.2-11.3 us | 12.0 us |
+| 256 KB | ~4,950 | 3,160-3,250 | 35.0 us | 26.1-27.3 us |
+
+Zero-copy is slower in throughput at every size and costs more sender CPU up to 64 KB. Only at 256 KB
+does it save sender CPU (about 25%), and even there throughput is lower. It is nowhere near 2x.
+
+Limits of this test: the kernel copies zero-copy data on loopback instead of pinning pages, so this
+host cannot show the benefit a real NIC might give; queue depth 1 serializes on the extra
+buffer-release notification CQE, so deeper pipelining could narrow the throughput gap. Supporting
+SendZc in nexio would also require changes to the verified completion slab (two CQEs per send).
+Not worth doing on this evidence.
