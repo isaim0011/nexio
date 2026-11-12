@@ -60,3 +60,7 @@ harness = false
 [[bench]]
 name = "fanout"
 harness = false
+
+[[bench]]
+name = "xdp"
+harness = false

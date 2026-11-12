@@ -113,3 +113,31 @@ deliveries), publisher on core 0, a single epoll receiver thread on core 1, 3 ru
 Batching all N sends into one syscall saves roughly 10%. The remaining ~4 us per delivery is the
 kernel TCP send path, which no submission strategy removes. Deliveries per second were bounded by
 the single receiver core (~125-135k/s), so CPU per delivery is the metric to read, not throughput.
+
+## Kernel bypass: AF_XDP receive vs kernel UDP (`benches/xdp.rs`, standalone, needs root)
+
+Two network namespaces joined by a veth pair on the 2-vCPU VPS (virtio_net host NIC, which supports
+AF_XDP only in copy mode). Sender: kernel UDP `sendmmsg` flood of 64-byte packets, pinned to core 1,
+5 seconds. Receiver, pinned to core 0, in the other namespace, either a normal kernel UDP socket
+(`recvmmsg`) or an AF_XDP socket fed by a hand-assembled six-instruction eBPF program
+(`bpf_redirect_map` into an XSKMAP; no clang or libbpf on the host, so the program is raw
+instructions loaded through `bpf(2)`). Three runs each; runs agree within 1%.
+
+| Receiver | Delivered packets/s | Loss |
+|:---|---:|:---|
+| Kernel UDP socket | 180,100-180,400 | none |
+| AF_XDP (copy mode) | 261,400-263,500 | none |
+
+AF_XDP delivered about 45% more packets per second end to end. Because the sender is itself a
+kernel UDP sender pinned to one core, and the veth receive path runs in that sender's context, part
+of the saving is the receive-side IP/UDP stack work no longer done on the sender's core.
+
+Limits, stated plainly:
+- This is raw UDP packets, not TCP. A bypass receiver delivers frames, not streams: using it for
+  WebSocket traffic means writing a user-space TCP stack (retransmission, congestion control,
+  reassembly), a very large and safety-critical piece of work this measurement does not cover.
+- The sender still used the kernel stack. Bypassing both sides would raise the ceiling; not measured.
+- veth in two namespaces on one host, not a real NIC; copy mode, not zero-copy. XDP attach mode
+  (native vs generic) was not recorded.
+- The AF_XDP receiver busy-polls, so its CPU time (~100% of a core) is not comparable to the blocking
+  kernel receiver (~58% of a core); the packets-per-second figure is the comparable number.
