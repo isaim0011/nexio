@@ -219,3 +219,24 @@ accepts `FEATURES=...`.
 About +5% throughput and ~2% less server CPU with the flags on; the throughput ranges do not overlap.
 Throughput is still partly client-limited, so the CPU column is the more reliable one, and its gap is
 small. Keeping the flags on by default is supported by this data.
+
+## Registered buffers and multishot accept/recv (`benches/mshot.rs`, standalone, rejected)
+
+Both techniques were tried in a standalone io_uring echo server first, so nexio's verified completion
+slab (which assumes one CQE per SQE; multishot violates that) stayed untouched until there was a reason
+to change it. Same machine and method as the other echo tests: server on core 0, byte-verifying kernel
+client on core 1, 100 connections x 2,000 messages of 128 B, 5 interleaved runs, server CPU from
+`/proc`. Every variant echoed every byte correctly (0 mismatches).
+
+| Variant | Throughput (msg/s) | Server CPU per message |
+|:---|---:|---:|
+| base: single-shot accept, Recv then Send (what nexio does) | 93,300-94,600 | 6.75-6.85 us |
+| `fixed`: ReadFixed/WriteFixed on one registered region | 92,600-92,900 | 6.95-7.00 us |
+| `multi`: multishot accept + multishot recv, provided-buffer ring | 90,500-91,500 | 6.70-6.80 us |
+
+Neither helps. Registered buffers are about 3% worse; multishot ties on CPU and lowers throughput by
+about 2-3%. Neither will be added to nexio. A first attempt at `fixed` registered 4,096 separate buffers
+and failed with ENOMEM (each pins a page against RLIMIT_MEMLOCK); the result above uses the standard
+single contiguous region, so the failure was a harness bug, not a finding. As with every other TCP echo
+result here, the per-message cost is dominated by the kernel TCP stack, which these techniques do not
+touch.

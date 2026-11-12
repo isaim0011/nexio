@@ -65,3 +65,7 @@ harness = false
 [[bench]]
 name = "xdp"
 harness = false
+
+[[bench]]
+name = "mshot"
+harness = false
