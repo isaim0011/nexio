@@ -1005,8 +1005,79 @@ fn parse_cli_args() -> BenchConfig {
     cfg
 }
 
+/// Separate-process modes. The in-process bench runs server shards and the
+/// load generator on the same cores, so a saturated client masks server
+/// differences. Here the driver script pins `--server-only` and
+/// `--client-only` to different cores and reads the server's CPU time from
+/// /proc, giving CPU-seconds-per-message independent of who saturates first.
+fn run_split_mode(args: &[String]) -> bool {
+    let get = |flag: &str| -> Option<String> {
+        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    };
+    let port: u16 = get("--port").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let msg_size: usize = get("--msg-size").and_then(|s| s.parse().ok()).unwrap_or(128);
+    let shards: usize = get("--shards").and_then(|s| s.parse().ok()).unwrap_or(1);
+
+    if let Some(backend) = get("--server-only") {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (_keep, _stop) = match backend.as_str() {
+            "tokio_unsharded" => {
+                let (h, s) = start_tokio_unsharded(port, shards, msg_size, ready_tx);
+                (vec![h], s)
+            }
+            "tokio_sharded" => start_tokio_sharded(port, shards, msg_size, ready_tx),
+            "nexio_sharded" => start_nexio_sharded(port, shards, msg_size, ready_tx),
+            "compio_sharded" => start_compio_sharded(port, shards, msg_size, ready_tx),
+            "monoio_sharded" => start_monoio_sharded(port, shards, msg_size, ready_tx),
+            other => {
+                eprintln!("unknown backend {other}");
+                std::process::exit(2);
+            }
+        };
+        let n = if backend == "tokio_unsharded" { 1 } else { shards };
+        for _ in 0..n {
+            match ready_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(())) => {}
+                other => {
+                    eprintln!("server failed to start: {other:?}");
+                    std::process::exit(3);
+                }
+            }
+        }
+        println!("READY {}", std::process::id());
+        loop {
+            thread::sleep(Duration::from_secs(3600));
+        }
+    }
+
+    if args.iter().any(|a| a == "--client-only") {
+        let conns: usize = get("--connections").and_then(|s| s.parse().ok()).unwrap_or(100);
+        let msgs: usize = get("--messages").and_then(|s| s.parse().ok()).unwrap_or(500);
+        match run_load_generator("split", "split", port, conns, msgs, msg_size) {
+            Ok(m) => println!(
+                "RESULT total={} wall_s={:.4} throughput={:.0} p50_us={:.1} p99_us={:.1}",
+                m.total_messages,
+                m.wall_time.as_secs_f64(),
+                m.throughput_msgs_sec,
+                m.p50_us,
+                m.p99_us
+            ),
+            Err(e) => {
+                eprintln!("load generation failed: {e}");
+                std::process::exit(4);
+            }
+        }
+        return true;
+    }
+    false
+}
+
 fn main() {
     raise_fd_limit();
+    let raw_args: Vec<String> = std::env::args().collect();
+    if run_split_mode(&raw_args) {
+        return;
+    }
     let cfg = parse_cli_args();
     print_hw_metadata();
 

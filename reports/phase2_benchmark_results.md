@@ -1,5 +1,7 @@
 # Phase 2 Benchmark Results: Multi-Runtime High-Concurrency TCP Echo Evaluation
 
+> **Superseded in part:** the throughput numbers below were client-limited and the summary overstates the lead over compio/monoio. See `split_benchmark_results.md` for the corrected, split-process results.
+
 **Date:** 2026-11-12 10:30:01 UTC  
 **Environment:** Oracle Cloud VPS (Frankfurt)  
 **Kernel:** Linux `6.12.0-207.111.5.1.el9uek.x86_64` #2 SMP PREEMPT_DYNAMIC  
