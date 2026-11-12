@@ -171,10 +171,9 @@ Done:
 - [x] Backend-neutral API test file (`tests/portable_api.rs`): echo, 4 MiB with simultaneous read and write on
       one socket, refused connect, EOF, cancelled read and accept, 200 concurrent clients, timer ordering.
       Passes on io_uring, Linux epoll and Windows
-- [x] CI matrix: Windows, macOS, Linux epoll
+- [x] CI matrix: Windows, macOS, Linux epoll; all green on first run (macOS: 42 unit + 9 API tests and clippy)
 
 Open, in priority order:
-- [ ] Confirm macOS (kqueue) is green in CI and fix whatever it finds
 - [ ] `UdpSocket` on the portable backend
 - [ ] Async file I/O on the portable backend (a small blocking thread pool; files have no readiness)
 - [ ] Soak and fuzz-style leak checks on the portable backend (the existing soak example already runs on it)

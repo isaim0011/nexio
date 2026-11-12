@@ -80,8 +80,7 @@ Each shard gets its own io_uring and its own executor, pinned to its own CPU. `T
 ## Backends
 
 The backend is chosen at build time. The public API is the same; the 9 tests in `tests/portable_api.rs`
-run unchanged against every backend. They pass on `io_uring`, on Linux epoll and on Windows; macOS
-is exercised by CI.
+run unchanged against every backend. They pass on `io_uring`, Linux epoll, Windows and macOS.
 
 | | `io_uring` backend | Portable backend |
 |:---|:---|:---|
@@ -92,7 +91,7 @@ is exercised by CI.
 | Async file I/O | yes | not yet |
 | `SO_REUSEPORT` sharding with `run_sharded` | yes | Unix only; not available on Windows |
 | Cancellation safety | completion slab, checked by Miri and Kani | nothing is ever handed to the kernel, so dropping a pending future just abandons the wait |
-| Tested | Linux 5.10 / 5.15 / 6.1 / 6.12, soak, fuzz, Miri, Kani | Windows (local), Linux epoll (VPS); macOS in CI |
+| Tested | Linux 5.10 / 5.15 / 6.1 / 6.12, soak, fuzz, Miri, Kani | Windows, macOS (CI), Linux epoll; no soak or fuzz run on it yet |
 
 The portable backend gives you the same API on every platform, not `io_uring`'s speed: it is an ordinary
 readiness reactor. Use `--features poll` on Linux if `io_uring` is blocked (some container runtimes
