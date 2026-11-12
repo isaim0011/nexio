@@ -145,8 +145,8 @@ Open, in priority order:
       claims 6.12 until this is done
 - [x] CI on every push: tests, fmt, rustdoc `-D warnings`, clippy `-D warnings`, Miri, Kani, benchmark
       smoke check. It was red on every push until this commit (the test job also ran the standalone
-      benchmark programs, and clippy tripped on one of them); fixed, and confirming green is tracked
-      by the next push's run
+      benchmark programs, and clippy tripped on one of them); fixed, and confirmed green on GitHub Actions
+      (all five jobs) at commit c76cd6f
 - [ ] **Public API review and docs pass** before 1.0 (the crate is `#![warn(missing_docs)]` already);
       decide the stability promise
 - [ ] **Fuzzing** the frame/slab paths with real inputs, not only Kani/Miri
