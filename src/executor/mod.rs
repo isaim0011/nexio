@@ -106,6 +106,10 @@ impl ExecutorInner {
 thread_local! {
     static EXECUTOR: RefCell<ExecutorInner> = RefCell::new(ExecutorInner::new());
     static IS_RUNNING: Cell<bool> = const { Cell::new(false) };
+    /// Incremented every time `block_on` starts on this thread. Tasks spawned in one
+    /// session are dropped when it ends, so anything that must keep a background task
+    /// alive across sessions needs to know when a new one began.
+    static SESSION: Cell<u64> = const { Cell::new(0) };
 }
 
 pub(crate) fn wake_task(id: TaskId) {
@@ -242,6 +246,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             panic!("cannot call block_on recursively on the same thread");
         }
         running.set(true);
+        SESSION.with(|s| s.set(s.get() + 1));
     });
 
     struct ResetGuard;
@@ -346,4 +351,10 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
             poll_root = RootWaker::is_woken();
         }
     }
+}
+
+/// The id of the `block_on` session currently (or most recently) running on this thread.
+#[cfg(nexio_uring)]
+pub(crate) fn session_id() -> u64 {
+    SESSION.with(|s| s.get())
 }

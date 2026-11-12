@@ -84,17 +84,40 @@ fn current_mailbox() -> Arc<Mailbox> {
 }
 
 #[cfg(nexio_uring)]
+struct UringMailbox {
+    mailbox: Arc<Mailbox>,
+    /// Our end of the eventfd; duplicated for each reader task.
+    reader: std::os::fd::OwnedFd,
+    /// The `block_on` session the current reader task belongs to.
+    session: u64,
+}
+
+#[cfg(nexio_uring)]
 fn current_mailbox() -> Arc<Mailbox> {
     thread_local! {
-        static MAILBOX: RefCell<Option<Arc<Mailbox>>> = const { RefCell::new(None) };
+        static MAILBOX: RefCell<Option<UringMailbox>> = const { RefCell::new(None) };
     }
     MAILBOX.with(|slot| {
-        if let Some(m) = slot.borrow().as_ref() {
-            return m.clone();
+        let mut slot = slot.borrow_mut();
+        let session = crate::executor::session_id();
+        match slot.as_mut() {
+            Some(m) => {
+                // Tasks die with the `block_on` session that spawned them, but this
+                // mailbox outlives it. Without a fresh reader in the new session no
+                // one would ever drain the eventfd and every result would be lost.
+                if m.session != session {
+                    spawn_uring_reader(&m.reader, m.mailbox.clone());
+                    m.session = session;
+                }
+                m.mailbox.clone()
+            }
+            None => {
+                let m = create_uring_mailbox(session);
+                let mailbox = m.mailbox.clone();
+                *slot = Some(m);
+                mailbox
+            }
         }
-        let m = start_uring_mailbox();
-        *slot.borrow_mut() = Some(m.clone());
-        m
     })
 }
 
@@ -102,7 +125,7 @@ fn current_mailbox() -> Arc<Mailbox> {
 /// the reactor reads an eventfd through the ordinary read path and drains the
 /// mailbox whenever a pool thread writes to it.
 #[cfg(nexio_uring)]
-fn start_uring_mailbox() -> Arc<Mailbox> {
+fn create_uring_mailbox(session: u64) -> UringMailbox {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     // SAFETY: eventfd has no pointer arguments; the result is checked below.
@@ -127,9 +150,18 @@ fn start_uring_mailbox() -> Arc<Mailbox> {
             );
         }
     })));
+    spawn_uring_reader(&reader, mailbox.clone());
+    UringMailbox {
+        mailbox,
+        reader,
+        session,
+    }
+}
 
-    let for_task = mailbox.clone();
-    let file = crate::fs::File::from_std(std::fs::File::from(reader));
+#[cfg(nexio_uring)]
+fn spawn_uring_reader(reader: &std::os::fd::OwnedFd, mailbox: Arc<Mailbox>) {
+    let dup = reader.try_clone().expect("failed to duplicate the eventfd");
+    let file = crate::fs::File::from_std(std::fs::File::from(dup));
     drop(crate::spawn(async move {
         let mut buf = vec![0u8; 8];
         loop {
@@ -138,10 +170,9 @@ fn start_uring_mailbox() -> Arc<Mailbox> {
             if res.is_err() {
                 break;
             }
-            deliver(for_task.drain());
+            deliver(mailbox.drain());
         }
     }));
-    mailbox
 }
 
 // ── the pool ─────────────────────────────────────────────────────────────────
@@ -175,9 +206,15 @@ impl Pool {
     fn submit(&'static self, job: Job) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         st.queue.push_back(job);
+        // `idle` only drops when a woken worker actually runs, so during a burst it
+        // overstates how many workers are free. Compare it with the queue length
+        // instead: if more jobs are waiting than there are idle workers, start another
+        // thread, otherwise a burst would queue up behind the few idle ones.
+        let need_thread = st.queue.len() > st.idle && st.threads < MAX_THREADS;
         if st.idle > 0 {
             self.wake.notify_one();
-        } else if st.threads < MAX_THREADS {
+        }
+        if need_thread {
             st.threads += 1;
             drop(st);
             let spawned = thread::Builder::new()
@@ -336,6 +373,47 @@ mod tests {
             "took {:?}",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn a_burst_still_scales_when_some_threads_are_already_idle() {
+        // Leave a batch of idle workers behind, then submit a burst bigger than that
+        // batch. Every job must get its own thread rather than queueing behind them.
+        block_on(async {
+            let mut warm = Vec::new();
+            for _ in 0..8 {
+                warm.push(spawn_blocking(|| thread::sleep(Duration::from_millis(20))));
+            }
+            for w in warm {
+                w.await.unwrap();
+            }
+        });
+        let t = Instant::now();
+        block_on(async {
+            let mut tasks = Vec::new();
+            for _ in 0..100 {
+                tasks.push(spawn_blocking(|| thread::sleep(Duration::from_millis(200))));
+            }
+            for t in tasks {
+                t.await.unwrap();
+            }
+        });
+        // 100 parallel sleeps of 200 ms: about 0.2 s, never anywhere near the 20 s serial time.
+        assert!(
+            t.elapsed() < Duration::from_millis(1500),
+            "burst was serialized behind idle workers: {:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn blocking_jobs_work_in_every_block_on_session_on_the_same_thread() {
+        // The reactor outlives a `block_on` call, but tasks do not. A second and third
+        // session on the same thread must still receive their blocking results.
+        for round in 0..3u32 {
+            let v = block_on(async move { spawn_blocking(move || round * 10).await.unwrap() });
+            assert_eq!(v, round * 10);
+        }
     }
 
     #[test]
