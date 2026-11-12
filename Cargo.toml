@@ -7,7 +7,7 @@ description = "A thread-per-core io_uring async runtime for Linux with owned-buf
 readme = "README.md"
 keywords = ["io-uring", "async", "runtime", "linux", "network"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
-exclude = ["reports/", "research_notes/", "bench/", "benches/", "scripts/", "utcp/", ".github/", "ROADMAP.md"]
+exclude = ["reports/", "research_notes/", "bench/", "benches/", "scripts/", "utcp/", "fuzz/", ".github/", "ROADMAP.md"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/isaim0011/nexio"
 

@@ -570,14 +570,17 @@ impl TcpStream {
         (res, buf)
     }
 
-    /// Read the exact number of bytes required to fill `buf` up to its capacity (`bytes_total()`).
-    pub async fn read_exact<B>(&self, mut buf: B) -> BufResult<usize, B>
+    /// Read until `buf` is full (`bytes_total()` bytes), like [`std::io::Read::read_exact`].
+    ///
+    /// Returns `Ok(())` once the buffer is full, or an `UnexpectedEof` error if the peer closed
+    /// first. The buffer is handed back either way.
+    pub async fn read_exact<B>(&self, mut buf: B) -> BufResult<(), B>
     where
         B: IoBufMut + Send + 'static,
     {
         let total = buf.bytes_total();
         if total == 0 {
-            return (Ok(0), buf);
+            return (Ok(()), buf);
         }
 
         // Fast path: avoid Slice wrapper on the common single-read completion.
@@ -593,7 +596,7 @@ impl TcpStream {
                     buf,
                 );
             }
-            Ok(n) if n >= total => return (Ok(n), buf),
+            Ok(n) if n >= total => return (Ok(()), buf),
             Ok(n) => n,
             Err(e) => return (Err(e), buf),
         };
@@ -624,7 +627,7 @@ impl TcpStream {
 
         // SAFETY: total bytes have been successfully read into the buffer.
         unsafe { buf.set_init(read_bytes) };
-        (Ok(read_bytes), buf)
+        (Ok(()), buf)
     }
 
     /// Write from `buf`. Returns `BufResult<usize, B>`.

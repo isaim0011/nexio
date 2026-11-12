@@ -91,3 +91,21 @@ jobs:
 
       - name: Run release benchmark smoke check
         run: cargo bench --bench echo -- --quick
+
+  fuzz:
+    name: Fuzz smoke (completion slab state machine)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Fuzz for 60 seconds
+        run: cargo +nightly fuzz run slab_ops -- -max_total_time=60

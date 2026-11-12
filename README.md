@@ -65,9 +65,11 @@ Each shard gets its own io_uring and its own executor, pinned to its own CPU. `T
 
 ## Requirements
 
-- Linux with `io_uring`. **Tested only on kernel 6.12.** The code targets 5.11+ and enables
-  `COOP_TASKRUN`, `DEFER_TASKRUN` and `SINGLE_ISSUER` (6.1+) when available, falling back to a plain
-  ring otherwise, but older kernels have not been run yet (tracked in the roadmap).
+- Linux with `io_uring`. The full test suite and a soak test pass on **vendor kernels 5.10 (Debian 11),
+  5.15 (Ubuntu 22.04 LTS) and 6.1 (Debian 12)** in KVM guests and on 6.12 on the host. nexio enables
+  `COOP_TASKRUN`, `DEFER_TASKRUN` and `SINGLE_ISSUER` (6.1+) when available and falls back to a plain
+  ring on older kernels. Vendors backport io_uring changes, so this does not prove every mainline
+  version in between; mainline 5.11 to 5.14 and other distributions' kernels have not been run.
 - Some container runtimes block `io_uring` with seccomp; if ring setup fails, that is why.
 - Declared MSRV is Rust 1.75; it has only been built and tested on current stable.
 - Other operating systems fail to compile with an explicit error. There is no fallback backend yet.
@@ -98,6 +100,15 @@ that is checked the hardest:
 - **Miri** (strict provenance) runs the pure-Rust slab and cancellation tests: `bash scripts/ci_miri.sh`.
 - **Integration tests** force submission-queue exhaustion, `-ECANCELED` races and fd-leak scenarios on a
   real kernel: `cargo test`.
+- **Fuzzing:** a coverage-guided target drives random insert/complete/drop/garbage-CQE sequences through
+  the slab and checks a model (no early drop, no double drop, no leak). 3.5M executions, no crashes; a
+  deliberately injected leak was caught in seconds. `cargo +nightly fuzz run slab_ops`.
+- **Soak:** 10 minutes of connection churn with random cancellation (2.0M byte-verified echoes, 337k
+  cancelled in-flight reads): 0 mismatches, flat memory, descriptors back to baseline.
+  `cargo run --release --example soak -- 600 128`.
+- **Kernel matrix:** tests plus soak inside real 5.10, 5.15 and 6.1 kernels: `scripts/kernel_matrix/run.sh`.
+
+Details and limits: [`reports/reliability_results.md`](reports/reliability_results.md).
 
 Limits: Miri and Kani cannot execute `io_uring` syscalls, so they cover the pure-Rust bookkeeping, not
 the kernel interaction. Cancellation of an in-flight `io_uring` operation is best-effort at the kernel
@@ -116,6 +127,8 @@ macOS backend. See [`ROADMAP.md`](ROADMAP.md).
 cargo test                       # Linux only
 cargo kani --tests               # needs the Kani toolchain
 bash scripts/ci_miri.sh          # needs nightly + Miri
+cargo +nightly fuzz run slab_ops # needs cargo-fuzz
+bash scripts/kernel_matrix/run.sh # needs KVM + qemu; boots 5.10/5.15/6.1 guests
 bash bench/split.sh              # pinned server/client echo benchmark
 ```
 

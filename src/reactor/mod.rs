@@ -4,7 +4,13 @@
 //! Multi-core scale-out: N independent reactors + SO_REUSEPORT sharding.
 
 pub mod builder;
+/// Internal operation futures. Public so external verification harnesses can reach them;
+/// **not covered by semver** and not part of nexio's supported API.
+#[doc(hidden)]
 pub mod op;
+/// Internal completion slab. Public so the fuzz, Kani and Miri harnesses can reach it;
+/// **not covered by semver** and not part of nexio's supported API.
+#[doc(hidden)]
 pub mod slab;
 
 use std::{cell::RefCell, ffi::CStr, io, net::SocketAddr, os::unix::io::RawFd, time::Duration};
@@ -13,6 +19,7 @@ use io_uring::{opcode, types, IoUring};
 use slab::{CompletionSlab, OpState, SlabKey};
 
 pub use builder::ReactorBuilder;
+#[doc(hidden)]
 pub use op::{AcceptOp, ConnectOp, LazyOp, Op, SimpleOp};
 
 // ── Thread-local handle ───────────────────────────────────────────────────────

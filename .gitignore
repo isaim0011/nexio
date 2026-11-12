@@ -1,3 +1,7 @@
 /target
 research_notes/
 /utcp/target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+/scripts/kernel_matrix/kinit/target

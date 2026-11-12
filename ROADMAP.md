@@ -140,17 +140,20 @@ Done:
 - [x] Clear compile error on non-Linux targets
 - [x] Repo cleanup (stale scaffold removed, duplicate scripts removed)
 
+Also done in this phase:
+- [x] **Kernel matrix:** full suite and soak pass on vendor kernels 5.10, 5.15 and 6.1 (KVM guests) and
+      6.12 (host); reproducible with `scripts/kernel_matrix/run.sh`. Mainline 5.11-5.14 untested
+- [x] **Fuzzing:** coverage-guided state-machine fuzzer for the completion slab; 3.5M runs, no crashes;
+      harness validated by injecting a real bug; 60-second smoke job in CI
+- [x] **Soak test:** 10 minutes, 128 clients, 2.0M verified echoes, 337k cancelled in-flight reads; no
+      mismatches, memory flat, descriptors back to baseline (`examples/soak.rs`)
+- [x] **API review, first pass:** internal modules hidden from docs and excluded from semver;
+      `TcpStream::read_exact` made consistent with `File::read_exact_at`
+
 Open, in priority order:
-- [ ] **Kernel matrix:** run the full test suite on 5.15 (Ubuntu 22.04 LTS) and 6.1; the README only
-      claims 6.12 until this is done
-- [x] CI on every push: tests, fmt, rustdoc `-D warnings`, clippy `-D warnings`, Miri, Kani, benchmark
-      smoke check. It was red on every push until this commit (the test job also ran the standalone
-      benchmark programs, and clippy tripped on one of them); fixed, and confirmed green on GitHub Actions
-      (all five jobs) at commit c76cd6f
-- [ ] **Public API review and docs pass** before 1.0 (the crate is `#![warn(missing_docs)]` already);
-      decide the stability promise
-- [ ] **Fuzzing** the frame/slab paths with real inputs, not only Kani/Miri
-- [ ] **Soak test:** hours-long run with connection churn and cancellations, watching for fd and memory leaks
+- [ ] Decide and document the 1.0 stability promise; revisit the `Send` bound on I/O buffers
+- [ ] Longer soak (hours) and a leak check at finer resolution than "does not grow in 10 minutes"
+- [ ] Mainline kernel coverage (5.11-5.14) and kernels with io_uring restricted by seccomp or sysctl
 - [ ] Publish to crates.io and make the repository public (needs the owner's explicit go-ahead)
 
 ## Phase 5 — features users will ask for

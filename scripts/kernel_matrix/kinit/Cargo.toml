@@ -1,0 +1,11 @@
+[package]
+name = "kinit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+# Standalone: not part of the nexio package or any workspace.
+[workspace]

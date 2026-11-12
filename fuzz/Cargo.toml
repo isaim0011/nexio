@@ -1,0 +1,22 @@
+[package]
+name = "nexio-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+nexio = { path = ".." }
+
+# Not part of the nexio package or any workspace.
+[workspace]
+
+[[bin]]
+name = "slab_ops"
+path = "fuzz_targets/slab_ops.rs"
+test = false
+doc = false
+bench = false
