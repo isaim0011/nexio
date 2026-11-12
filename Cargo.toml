@@ -2,6 +2,7 @@
 name = "nexio"
 version = "0.1.0"
 edition = "2021"
+authors = ["isaim0011"]
 rust-version = "1.75"
 description = "A thread-per-core io_uring async runtime for Linux with owned-buffer I/O and a cancellation-safety layer checked by Miri and Kani"
 readme = "README.md"
