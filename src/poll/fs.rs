@@ -1,7 +1,7 @@
 //! Async files on the portable backend.
 //!
 //! Regular files have no readiness interface on any platform, so every
-//! operation runs on the blocking pool ([`spawn_blocking`](crate::spawn_blocking)).
+//! operation runs on the blocking pool ([`spawn_blocking`]).
 //! The API matches the io_uring backend's `File`: the buffer goes in and comes
 //! back with the result.
 //!

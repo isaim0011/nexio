@@ -8,7 +8,7 @@
 //! # How a result gets back to the right thread
 //!
 //! Executor wakers are thread-local and must not be called from a pool thread.
-//! Instead each reactor thread owns a [`Mailbox`]: a worker stores its result,
+//! Instead each reactor thread owns a mailbox: a worker stores its result,
 //! pushes the job id into the mailbox and pokes the reactor awake; the reactor
 //! then drains the mailbox on its own thread and wakes the waiting tasks there.
 //! The future registers its waker *before* it checks for the result, so a result

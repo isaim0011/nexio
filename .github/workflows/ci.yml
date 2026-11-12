@@ -145,3 +145,8 @@ jobs:
 
       - name: Clippy (library, tests, examples)
         run: cargo clippy --lib --tests --examples ${{ matrix.args }} -- -D warnings
+
+      - name: Rustdoc with warnings as errors
+        run: cargo doc --no-deps ${{ matrix.args }}
+        env:
+          RUSTDOCFLAGS: -D warnings
