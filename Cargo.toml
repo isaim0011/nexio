@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["nexio"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["isaim0011"]
+repository = "https://github.com/isaim0011/nexio"

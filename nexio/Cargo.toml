@@ -1,0 +1,19 @@
+[package]
+name = "nexio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "A small, from-scratch async I/O runtime. Linux backend is real io_uring via the io-uring crate; a cross-platform fallback is future work, not yet built. See README.md for honest scope."
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"
+libc = "0.2"
+
+[dependencies]
+slab = "0.4"
+
+[[bin]]
+name = "echo_bench"
+path = "src/bin/echo_bench.rs"
