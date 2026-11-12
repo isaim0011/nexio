@@ -1,10 +1,50 @@
-[workspace]
-resolver = "2"
-members = ["nexio"]
-
-[workspace.package]
-version = "0.0.1"
+[package]
+name = "nexio"
+version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
+description = "A verified, single-core io_uring runtime for Linux"
 license = "MIT OR Apache-2.0"
-authors = ["isaim0011"]
 repository = "https://github.com/isaim0011/nexio"
+
+[features]
+default = []
+# Enable coop/defer taskrun flags (kernel 6.1+). Off by default so v0
+# can run on older kernels; flip on once we have benchmark evidence.
+coop-taskrun = []
+
+[dependencies]
+io-uring = "0.6"
+slab     = "0.4"
+libc     = "0.2"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tokio     = { version = "1", features = ["full"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+socket2   = { version = "0.5", features = ["all"] }
+num_cpus  = "1"
+compio    = { version = "0.19.2", features = ["runtime", "io-uring", "io", "net", "fs"] }
+monoio    = "0.2.4"
+core_affinity = "0.8.3"
+
+# Kani harnesses are compiled separately; this keeps them out of the
+# normal test binary.  Run:  cargo kani --harness <name>
+# [dev-dependencies.kani]
+# version = "0.47"
+
+[[bench]]
+name = "echo"
+harness = false
+
+[[bench]]
+name = "file_io"
+harness = false
+
+[[bench]]
+name = "udp"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

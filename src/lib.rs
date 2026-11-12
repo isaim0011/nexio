@@ -1,0 +1,31 @@
+//! nexio — a verified, single-core io_uring runtime.
+//!
+//! # Design constraints
+//!
+//! 1. **Owned buffers only.** The kernel holds a raw pointer from SQE
+//!    submission until the matching CQE arrives. Borrowed `&mut [u8]`
+//!    cannot model an external, uncancellable writer.
+//!
+//! 2. **Leak-until-real-completion cancellation.** Dropping an in-flight
+//!    op submits a best-effort `ASYNC_CANCEL` and moves the buffer into
+//!    the reactor slab. Buffer freed only when the real CQE lands.
+//!
+//! 3. **`!Send` tasks, one reactor per thread.** No work-stealing.
+//!    Multi-core: N independent reactors + SO_REUSEPORT sharding.
+//!
+//! 4. **Verification-first.** Pure-Rust layer (slab, Op state machine)
+//!    targets Miri + Kani. Syscall-adjacent layer targets integration
+//!    tests at high queue depth.
+
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs, unreachable_pub)]
+
+pub mod buf;
+pub mod executor;
+pub mod fs;
+pub mod net;
+pub mod reactor;
+pub mod time;
+
+pub use executor::{block_on, join2, select2, spawn, yield_now, JoinSet};
+pub use reactor::Reactor;
