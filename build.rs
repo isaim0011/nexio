@@ -7,15 +7,21 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(nexio_uring)");
     println!("cargo:rustc-check-cfg=cfg(nexio_poll)");
+    println!("cargo:rustc-check-cfg=cfg(nexio_runtime_fallback)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_POLL");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_FALLBACK");
 
     let linux = std::env::var("CARGO_CFG_TARGET_OS")
         .map(|os| os == "linux")
         .unwrap_or(false);
     let force_poll = std::env::var_os("CARGO_FEATURE_POLL").is_some();
+    let runtime_fallback = std::env::var_os("CARGO_FEATURE_RUNTIME_FALLBACK").is_some();
     if linux && !force_poll {
         println!("cargo:rustc-cfg=nexio_uring");
+        if runtime_fallback {
+            println!("cargo:rustc-cfg=nexio_runtime_fallback");
+        }
     } else {
         println!("cargo:rustc-cfg=nexio_poll");
     }

@@ -11,7 +11,6 @@
 //! 3. The slab index fits in a u32; high 32 bits carry a generation counter
 //!    to detect stale CQEs from a recycled slot.
 
-use slab::Slab;
 use std::task::Waker;
 
 use crate::buf::IoBufMut;
@@ -68,6 +67,11 @@ pub struct SockAddrStorage {
 }
 unsafe impl Send for SockAddrStorage {}
 impl ErasedBuf for SockAddrStorage {}
+
+/// Heap-allocated `iovec` array kept alive while a vectored SQE is in flight.
+pub(crate) struct IovecsStorage(pub(crate) Vec<libc::iovec>);
+unsafe impl Send for IovecsStorage {}
+impl ErasedBuf for IovecsStorage {}
 
 /// Guard that holds path for openat and closes an opened file descriptor if the operation was ignored/cancelled.
 pub struct OpenAtData {
@@ -168,13 +172,14 @@ impl MsgHdrData {
 /// ```
 pub enum OpState {
     /// Op is in-flight. Waker is updated each time the Future is polled.
-    /// buf is a PlaceholderBuf for normal ops (real buf is in `Op<B>::buf`).
-    /// For Ignored ops the real buf is moved here.
+    /// `buf` is `None` for normal ops whose real buffer lives in `Op<B>::buf` / `LazyOp<B>::buf`,
+    /// or `Some(...)` for ops with auxiliary heap state (e.g. `MsgHdrData`, `OpenAtData`, `SockAddrStorage`).
+    /// For Ignored ops the real buf is moved into `Ignored`.
     Submitted {
         /// Optional waker registered when the future is polled.
         waker: Option<Waker>,
-        /// Type-erased buffer or metadata held while in flight.
-        buf: Box<dyn ErasedBuf>,
+        /// Optional type-erased auxiliary metadata held while in flight.
+        buf: Option<Box<dyn ErasedBuf>>,
     },
     /// CQE arrived; result waiting to be consumed.
     Complete {
@@ -226,15 +231,23 @@ impl SlabKey {
 
 // ── CompletionSlab ────────────────────────────────────────────────────────────
 
-struct SlabEntry {
+const NO_FREE: usize = usize::MAX;
+
+enum SlotState {
+    Vacant { next_free: usize },
+    Occupied(OpState),
+}
+
+struct Slot {
     generation: u32,
-    state: OpState,
+    state: SlotState,
 }
 
 /// Completion slab tracking in-flight and completed operations.
 pub struct CompletionSlab {
-    inner: Slab<SlabEntry>,
-    generations: Vec<u32>,
+    slots: Vec<Slot>,
+    free_head: usize,
+    len: usize,
 }
 
 impl Default for CompletionSlab {
@@ -244,54 +257,85 @@ impl Default for CompletionSlab {
 }
 
 impl CompletionSlab {
-    /// Create a new `CompletionSlab` with default capacity (256).
+    /// Create a new `CompletionSlab` with hardware-adaptive initial capacity.
     pub fn new() -> Self {
-        Self::with_capacity(256)
+        Self::with_capacity(crate::profile::HardwareProfile::get().slab_capacity())
     }
 
     /// Create a new `CompletionSlab` with a specified initial capacity.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: Slab::with_capacity(capacity),
-            generations: Vec::with_capacity(capacity),
+            slots: Vec::with_capacity(capacity),
+            free_head: NO_FREE,
+            len: 0,
         }
     }
 
-    /// Insert a new in-flight op. Returns the key to embed in `user_data`.
-    pub fn insert(&mut self, state: OpState) -> SlabKey {
-        let entry = self.inner.vacant_entry();
-        let index = entry.key();
-        if index >= self.generations.len() {
-            self.generations.resize(index + 1, 0);
+    #[inline]
+    fn get_occupied_mut(&mut self, index: usize, generation: u32) -> Option<&mut OpState> {
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != generation {
+            return None;
         }
-        let generation = self.generations[index];
-        entry.insert(SlabEntry { generation, state });
-        SlabKey::new(index, generation)
+        match &mut slot.state {
+            SlotState::Occupied(op) => Some(op),
+            SlotState::Vacant { .. } => None,
+        }
+    }
+
+    #[inline]
+    fn free_slot(&mut self, index: usize) {
+        let slot = &mut self.slots[index];
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.state = SlotState::Vacant {
+            next_free: self.free_head,
+        };
+        self.free_head = index;
+        self.len -= 1;
+    }
+
+    /// Insert a new in-flight op. Returns the key to embed in `user_data`.
+    #[inline]
+    pub fn insert(&mut self, state: OpState) -> SlabKey {
+        self.len += 1;
+        if self.free_head != NO_FREE {
+            let index = self.free_head;
+            let slot = &mut self.slots[index];
+            let next_free = match slot.state {
+                SlotState::Vacant { next_free } => next_free,
+                SlotState::Occupied(_) => unreachable!("free list pointed to occupied slot"),
+            };
+            self.free_head = next_free;
+            slot.state = SlotState::Occupied(state);
+            SlabKey::new(index, slot.generation)
+        } else {
+            let index = self.slots.len();
+            self.slots.push(Slot {
+                generation: 0,
+                state: SlotState::Occupied(state),
+            });
+            SlabKey::new(index, 0)
+        }
     }
 
     /// Update (or set) the waker for a `Submitted` op.
     /// Called by `Op::poll` each time the future is polled.
+    #[inline]
     pub fn update_waker(&mut self, key: SlabKey, waker: Waker) {
-        if let Some(entry) = self.inner.get_mut(key.index()) {
-            if entry.generation == key.generation() {
-                if let OpState::Submitted {
-                    waker: ref mut w, ..
-                } = entry.state
-                {
-                    *w = Some(waker);
-                }
-            }
+        if let Some(OpState::Submitted {
+            waker: ref mut w, ..
+        }) = self.get_occupied_mut(key.index(), key.generation())
+        {
+            *w = Some(waker);
         }
     }
 
     /// Poll for a result. Returns `Some(i32)` if the op is `Complete`,
     /// else registers `waker` (if changed) and returns `None`.
+    #[inline]
     pub fn poll_result(&mut self, key: SlabKey, waker: &Waker) -> Option<i32> {
-        let entry = self.inner.get_mut(key.index())?;
-        if entry.generation != key.generation() {
-            return None;
-        }
-        match &mut entry.state {
+        let op = self.get_occupied_mut(key.index(), key.generation())?;
+        match op {
             OpState::Complete { result } => Some(*result),
             OpState::Submitted {
                 waker: ref mut w, ..
@@ -306,17 +350,14 @@ impl CompletionSlab {
     }
 
     /// Poll for a result and immediately consume/free the slot if `Complete`.
+    #[inline]
     pub fn poll_and_consume(&mut self, key: SlabKey, waker: &Waker) -> Option<i32> {
         let index = key.index();
-        let entry = self.inner.get_mut(index)?;
-        if entry.generation != key.generation() {
-            return None;
-        }
-        match &mut entry.state {
+        let op = self.get_occupied_mut(index, key.generation())?;
+        match op {
             OpState::Complete { result } => {
                 let res = *result;
-                self.generations[index] = self.generations[index].wrapping_add(1);
-                self.inner.remove(index);
+                self.free_slot(index);
                 Some(res)
             }
             OpState::Submitted {
@@ -336,41 +377,28 @@ impl CompletionSlab {
     /// Returns `Some(waker)` for `Submitted` ops (caller must wake it).
     /// Returns `None` for `Ignored` ops (buf dropped, slot freed).
     /// Returns `None` for stale/unknown keys (silently ignored).
+    #[inline]
     pub fn complete(&mut self, user_data: u64, result: i32) -> Option<Waker> {
         let key = SlabKey::from_u64(user_data);
         let index = key.index();
-
-        let entry = self.inner.get_mut(index)?;
-
-        if entry.generation != key.generation() {
-            return None; // stale CQE from a recycled slot
-        }
+        let op = self.get_occupied_mut(index, key.generation())?;
 
         // Swap state to a temporary so we can destructure without partial moves.
-        let prev = std::mem::replace(&mut entry.state, OpState::Complete { result });
+        let prev = std::mem::replace(op, OpState::Complete { result });
 
         match prev {
-            OpState::Submitted { waker, buf: _ } => {
-                // buf lives in Op<B>::buf, not here — PlaceholderBuf is dropped,
-                // that's fine. State is now Complete; Future will consume it.
-                waker
-            }
+            OpState::Submitted { waker, buf: _ } => waker,
             OpState::Ignored { mut buf, mut aux } => {
-                // Future was dropped; now the real CQE arrived. Free everything.
                 buf.on_ignored_completion(result);
                 if let Some(ref mut a) = aux {
                     a.on_ignored_completion(result);
                 }
                 drop(buf);
                 drop(aux);
-                self.generations[index] = self.generations[index].wrapping_add(1);
-                self.inner.remove(index);
+                self.free_slot(index);
                 None
             }
-            OpState::Complete { .. } => {
-                // Double-completion: ignore duplicate CQE safely without panicking.
-                None
-            }
+            OpState::Complete { .. } => None,
         }
     }
 
@@ -381,30 +409,24 @@ impl CompletionSlab {
     /// Returns `false` if the op had already completed (in which case it is cleaned up immediately).
     pub fn ignore(&mut self, key: SlabKey, buf: Box<dyn ErasedBuf>) -> bool {
         let index = key.index();
-        if let Some(entry) = self.inner.get_mut(index) {
-            if entry.generation == key.generation() {
-                match &mut entry.state {
-                    OpState::Submitted {
-                        buf: ref mut prev_buf,
-                        ..
-                    } => {
-                        let old_buf = std::mem::replace(prev_buf, Box::new(PlaceholderBuf));
-                        entry.state = OpState::Ignored {
-                            buf,
-                            aux: Some(old_buf),
-                        };
-                        return true;
-                    }
-                    OpState::Complete { .. } => {
-                        drop(buf);
-                        self.generations[index] = self.generations[index].wrapping_add(1);
-                        self.inner.remove(index);
-                        return false;
-                    }
-                    OpState::Ignored { .. } => {
-                        drop(buf);
-                        return false;
-                    }
+        if let Some(op) = self.get_occupied_mut(index, key.generation()) {
+            match op {
+                OpState::Submitted {
+                    buf: ref mut prev_buf,
+                    ..
+                } => {
+                    let old_buf = prev_buf.take();
+                    *op = OpState::Ignored { buf, aux: old_buf };
+                    return true;
+                }
+                OpState::Complete { .. } => {
+                    drop(buf);
+                    self.free_slot(index);
+                    return false;
+                }
+                OpState::Ignored { .. } => {
+                    drop(buf);
+                    return false;
                 }
             }
         }
@@ -425,28 +447,28 @@ impl CompletionSlab {
 
     fn ignore_simple_inner(&mut self, key: SlabKey, close_fd_on_complete: bool) -> bool {
         let index = key.index();
-        if let Some(entry) = self.inner.get_mut(index) {
-            if entry.generation == key.generation() {
-                let state = std::mem::replace(&mut entry.state, OpState::Complete { result: 0 });
-                match state {
-                    OpState::Submitted { buf, .. } => {
-                        entry.state = OpState::Ignored { buf, aux: None };
-                        return true;
-                    }
-                    OpState::Complete { result } => {
-                        if close_fd_on_complete && result >= 0 {
-                            unsafe {
-                                libc::close(result as libc::c_int);
-                            }
+        if let Some(op) = self.get_occupied_mut(index, key.generation()) {
+            let state = std::mem::replace(op, OpState::Complete { result: 0 });
+            match state {
+                OpState::Submitted { buf, .. } => {
+                    *op = OpState::Ignored {
+                        buf: buf.unwrap_or_else(|| Box::new(PlaceholderBuf)),
+                        aux: None,
+                    };
+                    return true;
+                }
+                OpState::Complete { result } => {
+                    if close_fd_on_complete && result >= 0 {
+                        unsafe {
+                            libc::close(result as libc::c_int);
                         }
-                        self.generations[index] = self.generations[index].wrapping_add(1);
-                        self.inner.remove(index);
-                        return false;
                     }
-                    OpState::Ignored { buf, aux } => {
-                        entry.state = OpState::Ignored { buf, aux };
-                        return false;
-                    }
+                    self.free_slot(index);
+                    return false;
+                }
+                OpState::Ignored { buf, aux } => {
+                    *op = OpState::Ignored { buf, aux };
+                    return false;
                 }
             }
         }
@@ -455,38 +477,31 @@ impl CompletionSlab {
 
     /// Mark a `Complete` slot as consumed and free it.
     /// Called by `Op::poll` after extracting the result.
+    #[inline]
     pub fn consume(&mut self, key: SlabKey) {
         let index = key.index();
-        if let Some(entry) = self.inner.get(index) {
-            if entry.generation == key.generation()
-                && matches!(entry.state, OpState::Complete { .. })
-            {
-                self.generations[index] = self.generations[index].wrapping_add(1);
-                self.inner.remove(index);
-            }
+        if let Some(OpState::Complete { .. }) = self.get_occupied_mut(index, key.generation()) {
+            self.free_slot(index);
         }
     }
 
     /// Remove a slot that failed submission before being enqueued to kernel.
     pub(crate) fn remove_unsubmitted(&mut self, key: SlabKey) {
         let index = key.index();
-        if let Some(entry) = self.inner.get(index) {
-            if entry.generation == key.generation()
-                && matches!(entry.state, OpState::Submitted { .. })
-            {
-                self.generations[index] = self.generations[index].wrapping_add(1);
-                self.inner.remove(index);
-            }
+        if let Some(OpState::Submitted { .. }) = self.get_occupied_mut(index, key.generation()) {
+            self.free_slot(index);
         }
     }
 
     /// Returns the number of active entries in the slab.
+    #[inline]
     pub fn len(&self) -> usize {
-        self.inner.len()
+        self.len
     }
 
     /// Returns `true` if the slab contains no active entries.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.len == 0
     }
 }

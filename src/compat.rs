@@ -22,10 +22,12 @@
 #![cfg_attr(not(any(feature = "tokio-compat", feature = "http")), allow(dead_code))]
 
 use std::{
+    alloc::{alloc, dealloc, handle_alloc_error, Layout},
     future::Future,
     io,
     mem::MaybeUninit,
     pin::Pin,
+    ptr::NonNull,
     rc::Rc,
     task::{Context, Poll},
 };
@@ -37,8 +39,104 @@ const MAX_READ: usize = 256 * 1024;
 /// Most bytes accepted into the write buffer per `poll_write`.
 const WRITE_CHUNK: usize = 256 * 1024;
 
-type BoxFut = Pin<Box<dyn Future<Output = (io::Result<usize>, Vec<u8>)>>>;
 type ShutdownFut = Pin<Box<dyn Future<Output = io::Result<()>>>>;
+
+/// Single-allocation reusable slot for `!Send` futures of a fixed return type.
+///
+/// Allocates once on the first [`set`](Self::set) call and reuses the same heap
+/// buffer for all subsequent futures of the same (or smaller) layout.
+struct ReusableLocalBoxFuture<T> {
+    ptr: NonNull<u8>,
+    layout: Layout,
+    occupied: bool,
+    poll_fn: unsafe fn(NonNull<u8>, &mut Context<'_>) -> Poll<T>,
+    drop_fn: unsafe fn(NonNull<u8>),
+}
+
+impl<T> ReusableLocalBoxFuture<T> {
+    fn empty() -> Self {
+        unsafe fn noop_poll<T>(_: NonNull<u8>, _: &mut Context<'_>) -> Poll<T> {
+            unreachable!("polled empty ReusableLocalBoxFuture")
+        }
+        unsafe fn noop_drop(_: NonNull<u8>) {}
+        Self {
+            ptr: NonNull::dangling(),
+            layout: Layout::new::<()>(),
+            occupied: false,
+            poll_fn: noop_poll::<T>,
+            drop_fn: noop_drop,
+        }
+    }
+
+    fn set<F: Future<Output = T> + 'static>(&mut self, fut: F) {
+        if self.occupied {
+            self.occupied = false;
+            // SAFETY: `self.ptr` currently holds a valid initialized future of the previous type.
+            unsafe { (self.drop_fn)(self.ptr) };
+        }
+        let new_layout = Layout::new::<F>();
+        if new_layout.size() > 0
+            && (new_layout.size() > self.layout.size() || new_layout.align() > self.layout.align())
+        {
+            if self.layout.size() > 0 {
+                // SAFETY: `self.ptr` was allocated with `self.layout` and is currently unoccupied.
+                unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+                self.layout = Layout::new::<()>();
+                self.ptr = NonNull::dangling();
+            }
+            // SAFETY: `new_layout.size() > 0`.
+            let raw = unsafe { alloc(new_layout) };
+            let Some(nn) = NonNull::new(raw) else {
+                handle_alloc_error(new_layout);
+            };
+            self.ptr = nn;
+            self.layout = new_layout;
+        }
+        if new_layout.size() > 0 {
+            // SAFETY: `self.ptr` is valid for writes of `F` with matching alignment.
+            unsafe { self.ptr.as_ptr().cast::<F>().write(fut) };
+        } else {
+            // ZST future: forget after verifying size == 0; `NonNull::dangling()` is aligned for `F`.
+            std::mem::forget(fut);
+        }
+        unsafe fn poll_impl<F: Future<Output = T>, T>(
+            ptr: NonNull<u8>,
+            cx: &mut Context<'_>,
+        ) -> Poll<T> {
+            // SAFETY: `ptr` points to a pinned, initialized `F`.
+            let pin = unsafe { Pin::new_unchecked(&mut *ptr.as_ptr().cast::<F>()) };
+            pin.poll(cx)
+        }
+        unsafe fn drop_impl<F>(ptr: NonNull<u8>) {
+            // SAFETY: `ptr` points to an initialized `F` that is about to be marked unoccupied.
+            unsafe { std::ptr::drop_in_place(ptr.as_ptr().cast::<F>()) };
+        }
+        self.poll_fn = poll_impl::<F, T>;
+        self.drop_fn = drop_impl::<F>;
+        self.occupied = true;
+    }
+
+    #[inline]
+    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<T> {
+        debug_assert!(self.occupied);
+        // SAFETY: `self.occupied` is true and `self.poll_fn` matches the stored `F`.
+        unsafe { (self.poll_fn)(self.ptr, cx) }
+    }
+}
+
+impl<T> Drop for ReusableLocalBoxFuture<T> {
+    fn drop(&mut self) {
+        if self.occupied {
+            self.occupied = false;
+            // SAFETY: `self.ptr` holds an initialized future.
+            unsafe { (self.drop_fn)(self.ptr) };
+        }
+        if self.layout.size() > 0 {
+            // SAFETY: `self.ptr` was allocated with `self.layout`.
+            unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+        }
+    }
+}
 
 /// A stream the adapter can drive: owned-buffer reads and writes plus a write-half shutdown.
 ///
@@ -46,9 +144,15 @@ type ShutdownFut = Pin<Box<dyn Future<Output = io::Result<()>>>>;
 /// feature). It is sealed: you do not implement it yourself.
 pub trait Duplex: sealed::Sealed + Sized + 'static {
     #[doc(hidden)]
-    fn read_owned(self: Rc<Self>, buf: Vec<u8>) -> BoxFut;
+    fn read_owned(
+        self: Rc<Self>,
+        buf: Vec<u8>,
+    ) -> impl Future<Output = (io::Result<usize>, Vec<u8>)> + 'static;
     #[doc(hidden)]
-    fn write_all_owned(self: Rc<Self>, buf: Vec<u8>) -> BoxFut;
+    fn write_all_owned(
+        self: Rc<Self>,
+        buf: Vec<u8>,
+    ) -> impl Future<Output = (io::Result<usize>, Vec<u8>)> + 'static;
     #[doc(hidden)]
     fn shutdown_owned(self: Rc<Self>) -> ShutdownFut;
 }
@@ -61,15 +165,21 @@ macro_rules! impl_duplex {
     ($ty:ty) => {
         impl sealed::Sealed for $ty {}
         impl Duplex for $ty {
-            fn read_owned(self: Rc<Self>, buf: Vec<u8>) -> BoxFut {
-                Box::pin(async move { self.read(buf).await })
+            fn read_owned(
+                self: Rc<Self>,
+                buf: Vec<u8>,
+            ) -> impl Future<Output = (io::Result<usize>, Vec<u8>)> + 'static {
+                async move { self.read(buf).await }
             }
-            fn write_all_owned(self: Rc<Self>, buf: Vec<u8>) -> BoxFut {
-                Box::pin(async move {
+            fn write_all_owned(
+                self: Rc<Self>,
+                buf: Vec<u8>,
+            ) -> impl Future<Output = (io::Result<usize>, Vec<u8>)> + 'static {
+                async move {
                     let len = buf.len();
                     let (res, buf) = self.write_all(buf).await;
                     (res.map(|()| len), buf)
-                })
+                }
             }
             fn shutdown_owned(self: Rc<Self>) -> ShutdownFut {
                 Box::pin(async move { self.shutdown(std::net::Shutdown::Write) })
@@ -84,7 +194,7 @@ impl_duplex!(crate::net::UnixStream);
 
 enum ReadState {
     Idle(Option<Vec<u8>>),
-    Pending(BoxFut),
+    Pending,
     Buffered {
         buf: Vec<u8>,
         pos: usize,
@@ -94,14 +204,16 @@ enum ReadState {
 
 enum WriteState {
     Idle(Option<Vec<u8>>),
-    Pending(BoxFut),
+    Pending,
 }
 
 /// Wraps a nexio stream so it implements the ecosystem's poll-based I/O traits.
 pub struct Compat<S: Duplex> {
     stream: Rc<S>,
     read: ReadState,
+    read_fut: ReusableLocalBoxFuture<(io::Result<usize>, Vec<u8>)>,
     write: WriteState,
+    write_fut: ReusableLocalBoxFuture<(io::Result<usize>, Vec<u8>)>,
     /// A write that finished (with an error) while it was being started; reported by the next call.
     write_err: Option<io::Error>,
     shutdown: ShutdownState,
@@ -122,7 +234,9 @@ impl<S: Duplex> Compat<S> {
         Self {
             stream: Rc::new(stream),
             read: ReadState::Idle(None),
+            read_fut: ReusableLocalBoxFuture::empty(),
             write: WriteState::Idle(None),
+            write_fut: ReusableLocalBoxFuture::empty(),
             write_err: None,
             shutdown: ShutdownState::NotStarted,
             read_hint: MIN_READ,
@@ -174,9 +288,10 @@ impl<S: Duplex> Compat<S> {
                     } else {
                         buf.reserve(want);
                     }
-                    self.read = ReadState::Pending(self.stream.clone().read_owned(buf));
+                    self.read_fut.set(self.stream.clone().read_owned(buf));
+                    self.read = ReadState::Pending;
                 }
-                ReadState::Pending(fut) => match fut.as_mut().poll(cx) {
+                ReadState::Pending => match self.read_fut.poll(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready((res, buf)) => match res {
                         Ok(0) => {
@@ -217,8 +332,8 @@ impl<S: Duplex> Compat<S> {
         if let Some(e) = self.write_err.take() {
             return Poll::Ready(Err(e));
         }
-        if let WriteState::Pending(fut) = &mut self.write {
-            match fut.as_mut().poll(cx) {
+        if let WriteState::Pending = &self.write {
+            match self.write_fut.poll(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready((res, buf)) => {
                     self.write = WriteState::Idle(Some(buf));
@@ -249,11 +364,11 @@ impl<S: Duplex> Compat<S> {
         buf.clear();
         let n = src.len().min(WRITE_CHUNK);
         buf.extend_from_slice(&src[..n]);
-        let mut fut = self.stream.clone().write_all_owned(buf);
+        self.write_fut.set(self.stream.clone().write_all_owned(buf));
         // Start the write right away: a future that is never polled never submits its I/O, and
         // nothing would wake the caller to poll it later (hyper, for one, may not flush).
-        match fut.as_mut().poll(cx) {
-            Poll::Pending => self.write = WriteState::Pending(fut),
+        match self.write_fut.poll(cx) {
+            Poll::Pending => self.write = WriteState::Pending,
             Poll::Ready((res, buf)) => {
                 self.write = WriteState::Idle(Some(buf));
                 if let Err(e) = res {

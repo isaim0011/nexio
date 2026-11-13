@@ -30,30 +30,33 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use slab::Slab;
-
 use crate::reactor::REACTOR;
-use task::{Task, TaskShared, TaskState};
+use task::{Task, TaskControl, TaskShared, TaskState};
 use waker::{RootWaker, TaskWaker};
 
-struct TaskSlot {
+const NO_FREE: usize = usize::MAX;
+
+struct Slot {
     generation: u32,
-    task: Option<Task>,
+    occupied: bool,
     queued: bool,
+    task: Option<Task>,
+    next_free: usize,
 }
 
 struct ExecutorInner {
-    tasks: Slab<TaskSlot>,
-    generations: Vec<u32>,
+    slots: Vec<Slot>,
+    free_head: usize,
     ready_queue: VecDeque<(usize, u32)>,
 }
 
 impl ExecutorInner {
     fn new() -> Self {
+        let cap = crate::profile::HardwareProfile::get().executor_capacity();
         Self {
-            tasks: Slab::with_capacity(256),
-            generations: Vec::with_capacity(256),
-            ready_queue: VecDeque::with_capacity(256),
+            slots: Vec::with_capacity(cap),
+            free_head: NO_FREE,
+            ready_queue: VecDeque::with_capacity(cap),
         }
     }
 
@@ -81,33 +84,60 @@ impl ExecutorInner {
         waker_fn: impl FnOnce(TaskId) -> Waker,
         make_task: impl FnOnce(TaskId, Waker) -> Task,
     ) -> TaskId {
-        let entry = self.tasks.vacant_entry();
-        let index = entry.key();
-        if index >= self.generations.len() {
-            self.generations.resize(index + 1, 0);
-        }
-        let generation = self.generations[index];
+        let (index, generation) = if self.free_head != NO_FREE {
+            let idx = self.free_head;
+            let slot = &mut self.slots[idx];
+            self.free_head = slot.next_free;
+            (idx, slot.generation)
+        } else {
+            let idx = self.slots.len();
+            self.slots.push(Slot {
+                generation: 0,
+                occupied: false,
+                queued: false,
+                task: None,
+                next_free: NO_FREE,
+            });
+            (idx, 0)
+        };
         let id = Self::pack_id(index, generation);
         let waker = waker_fn(id);
         let task = make_task(id, waker);
-        entry.insert(TaskSlot {
-            generation,
-            task: Some(task),
-            queued: true,
-        });
+        let slot = &mut self.slots[index];
+        slot.occupied = true;
+        slot.queued = true;
+        slot.task = Some(task);
+        slot.next_free = NO_FREE;
         self.ready_queue.push_back((index, generation));
         id
     }
 
+    #[inline]
     fn remove_slot(&mut self, index: usize) {
-        if self.tasks.contains(index) {
-            self.generations[index] = self.generations[index].wrapping_add(1);
-            self.tasks.remove(index);
+        if let Some(slot) = self.slots.get_mut(index) {
+            if slot.occupied {
+                slot.occupied = false;
+                slot.queued = false;
+                slot.task = None;
+                slot.generation = slot.generation.wrapping_add(1);
+                slot.next_free = self.free_head;
+                self.free_head = index;
+            }
         }
     }
 
     fn clear(&mut self) {
-        self.tasks.clear();
+        self.free_head = NO_FREE;
+        for (index, slot) in self.slots.iter_mut().enumerate().rev() {
+            if slot.occupied {
+                slot.occupied = false;
+                slot.queued = false;
+                slot.task = None;
+                slot.generation = slot.generation.wrapping_add(1);
+            }
+            slot.next_free = self.free_head;
+            self.free_head = index;
+        }
         self.ready_queue.clear();
     }
 }
@@ -130,8 +160,8 @@ pub(crate) fn wake_task(id: TaskId) {
     }
     EXECUTOR.with(|exec| {
         let mut inner = exec.borrow_mut();
-        let should_queue = if let Some(slot) = inner.tasks.get_mut(index) {
-            if slot.generation == gen && !slot.queued {
+        let should_queue = if let Some(slot) = inner.slots.get_mut(index) {
+            if slot.occupied && slot.generation == gen && !slot.queued {
                 slot.queued = true;
                 true
             } else {
@@ -165,8 +195,8 @@ pub(crate) fn cancel_task(id: TaskId) {
     }
     EXECUTOR.with(|exec| {
         let mut inner = exec.borrow_mut();
-        if let Some(slot) = inner.tasks.get(index) {
-            if slot.generation == gen {
+        if let Some(slot) = inner.slots.get(index) {
+            if slot.occupied && slot.generation == gen {
                 inner.remove_slot(index);
             }
         }
@@ -183,24 +213,25 @@ where
 {
     let shared = Rc::new(TaskShared {
         state: RefCell::new(TaskState::Running { join_waker: None }),
+        is_cancelled: Cell::new(false),
     });
     let shared_task = Rc::clone(&shared);
-    let is_cancelled = Rc::new(Cell::new(false));
-    let is_cancelled_task = Rc::clone(&is_cancelled);
 
     let wrapped = async move {
-        if is_cancelled_task.get() {
+        if shared_task.is_cancelled.get() {
             return;
         }
 
         let output = future.await;
 
-        if is_cancelled_task.get() {
+        if shared_task.is_cancelled.get() {
             return;
         }
 
         // If JoinHandle was already dropped, drop the output immediately.
-        if Rc::strong_count(&shared_task) == 1 {
+        // Note: `Task` holds one `Rc<dyn TaskControl>` clone and `wrapped` holds `shared_task`,
+        // so `strong_count == 2` means the caller dropped `JoinHandle`.
+        if Rc::strong_count(&shared_task) == 2 {
             drop(output);
             return;
         }
@@ -209,38 +240,23 @@ where
         if let TaskState::Running { join_waker } = &mut *state {
             let waker = join_waker.take();
             *state = TaskState::Completed(output);
+            drop(state);
             if let Some(w) = waker {
                 w.wake();
             }
         }
     };
 
-    let shared_for_panic = Rc::clone(&shared);
-    let on_panic = Box::new(move || {
-        let mut state = shared_for_panic.state.borrow_mut();
-        if let TaskState::Running { join_waker } = &mut *state {
-            let waker = join_waker.take();
-            *state = TaskState::Panicked;
-            if let Some(w) = waker {
-                w.wake();
-            }
-        }
-    });
-
+    let control: Rc<dyn TaskControl> = Rc::clone(&shared) as Rc<dyn TaskControl>;
     let boxed = Box::pin(wrapped);
-    let cancelled_clone = Rc::clone(&is_cancelled);
     let task_id = EXECUTOR.with(|exec| {
         exec.borrow_mut()
             .insert_task(TaskWaker::into_waker, |id, waker| {
-                Task::new(id, waker, cancelled_clone, boxed, on_panic)
+                Task::new(id, waker, control, boxed)
             })
     });
 
-    JoinHandle {
-        task_id,
-        shared,
-        is_cancelled,
-    }
+    JoinHandle { task_id, shared }
 }
 
 /// Cooperatively yields execution back to the executor, rescheduling the current task
@@ -295,6 +311,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
     let waker = RootWaker::into_waker();
     let mut cx = Context::from_waker(&waker);
     let mut poll_root = true;
+    let mut wakers: Vec<Waker> = Vec::with_capacity(64);
 
     loop {
         // 1. Poll the root future on initial entry or when woken.
@@ -309,14 +326,15 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         let mut has_ready_tasks = false;
         let batch_size = EXECUTOR.with(|exec| exec.borrow().ready_queue.len());
         if batch_size > 0 {
-            let max_steps = batch_size.max(64);
+            let min_batch = crate::profile::HardwareProfile::get().executor_min_batch();
+            let max_steps = batch_size.max(min_batch);
 
             for _ in 0..max_steps {
                 let popped = EXECUTOR.with(|exec| {
                     let mut inner = exec.borrow_mut();
                     while let Some((index, queued_gen)) = inner.ready_queue.pop_front() {
-                        if let Some(slot) = inner.tasks.get_mut(index) {
-                            if slot.generation == queued_gen {
+                        if let Some(slot) = inner.slots.get_mut(index) {
+                            if slot.occupied && slot.generation == queued_gen {
                                 slot.queued = false;
                                 if let Some(task) = slot.task.take() {
                                     return Some((index, slot.generation, task));
@@ -332,11 +350,11 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
                     Some(t) => t,
                 };
 
-                if task.is_cancelled.get() {
+                if task.is_cancelled() {
                     EXECUTOR.with(|exec| {
                         let mut inner = exec.borrow_mut();
-                        if let Some(slot) = inner.tasks.get(index) {
-                            if slot.generation == gen {
+                        if let Some(slot) = inner.slots.get(index) {
+                            if slot.occupied && slot.generation == gen {
                                 inner.remove_slot(index);
                             }
                         }
@@ -348,9 +366,9 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 
                 EXECUTOR.with(|exec| {
                     let mut inner = exec.borrow_mut();
-                    if let Some(slot) = inner.tasks.get_mut(index) {
-                        if slot.generation == gen {
-                            if poll_res == Poll::Pending && !task.is_cancelled.get() {
+                    if let Some(slot) = inner.slots.get_mut(index) {
+                        if slot.occupied && slot.generation == gen {
+                            if poll_res == Poll::Pending && !task.is_cancelled() {
                                 slot.task = Some(task);
                             } else {
                                 inner.remove_slot(index);
@@ -375,12 +393,22 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         if has_ready_tasks || RootWaker::is_woken() {
             REACTOR.with(|r| {
                 r.borrow_mut()
-                    .submit_and_poll()
+                    .submit_and_poll_into(&mut wakers)
                     .expect("reactor submit_and_poll failed")
             });
+            for w in wakers.drain(..) {
+                w.wake();
+            }
             poll_root = RootWaker::is_woken();
         } else {
-            REACTOR.with(|r| r.borrow_mut().park().expect("reactor park failed"));
+            REACTOR.with(|r| {
+                r.borrow_mut()
+                    .park_into(&mut wakers)
+                    .expect("reactor park failed")
+            });
+            for w in wakers.drain(..) {
+                w.wake();
+            }
             poll_root = RootWaker::is_woken();
         }
     }

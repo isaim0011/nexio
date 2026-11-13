@@ -8,10 +8,10 @@ use std::{
     os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
 };
 
+use super::{sockaddr_storage_to_addr, socket_addr_to_storage, CloseOnDrop};
 use crate::{
     buf::{BufResult, IoBuf, IoBufMut},
-    net::{sockaddr_storage_to_addr, socket_addr_to_storage, CloseOnDrop},
-    reactor::REACTOR,
+    reactor::with_uring_mut,
 };
 
 /// An asynchronous UDP datagram socket.
@@ -225,8 +225,7 @@ impl UdpSocket {
     /// Wait until the socket is ready for reading (or writing), using a one-shot
     /// `POLL_ADD`. Dropping the future cancels it; it holds no buffer.
     async fn wait(&self, write: bool) -> io::Result<()> {
-        let op = REACTOR.with(|r| {
-            let mut r = r.borrow_mut();
+        let op = with_uring_mut(|r| {
             if write {
                 r.poll_writable(self.fd)
             } else {
@@ -276,9 +275,8 @@ impl UdpSocket {
     {
         let mut buf = buf;
         loop {
-            let key = match REACTOR.with(|r| unsafe {
-                r.borrow_mut()
-                    .submit_sendmsg(self.fd, &buf, Some(target), 0)
+            let key = match with_uring_mut(|r| unsafe {
+                r.submit_sendmsg(self.fd, &buf, Some(target), 0)
             }) {
                 Ok(k) => k,
                 Err(e) => return (Err(e), buf),

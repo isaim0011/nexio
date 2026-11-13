@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "nexio-macros"]
+
 [package]
 name = "nexio"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["isaim0011"]
 rust-version = "1.75"
@@ -13,28 +16,31 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/isaim0011/nexio"
 
 [features]
-default = []
-# COOP_TASKRUN / DEFER_TASKRUN / SINGLE_ISSUER are ON by default (kernel 6.1+;
-# the reactor falls back to a plain ring on older kernels). Enable this feature
-# to turn them off, e.g. to A/B them in benchmarks.
-no-coop-taskrun = []
+default = ["macros"]
+# Enable #[nexio::main] and #[nexio::test] procedural macros.
+macros = ["dep:nexio-macros"]
+# Opt in to COOP_TASKRUN / DEFER_TASKRUN / SINGLE_ISSUER on io_uring (kernel 6.1+).
+coop-taskrun = []
 # Use the portable readiness backend (epoll/kqueue/IOCP) even on Linux, e.g. where io_uring is blocked.
 poll = ["dep:polling"]
+# Compile both io_uring and epoll backends on Linux, falling back at runtime if io_uring_setup is blocked.
+runtime-fallback = ["dep:polling"]
 # Implement tokio::io::AsyncRead/AsyncWrite for nexio streams (nexio::compat::Compat).
 tokio-compat = ["dep:tokio"]
-# HTTP/1.1 client and server built on hyper (implies the hyper I/O traits for Compat).
+# HTTP/1.1 and HTTP/2 client and server built on hyper (implies the hyper I/O traits for Compat).
 http = ["dep:hyper", "dep:http-body-util"]
 # TLS via rustls (nexio::tls), crypto provider ring.
 tls = ["dep:rustls"]
 
 [dependencies]
+nexio-macros = { path = "nexio-macros", version = "0.2.5", optional = true }
 slab     = "0.4"
 libc     = "0.2"
 pin-project-lite = "0.2"
 # Portable backend; pulled in automatically off Linux, or on Linux with `--features poll`.
 polling  = { version = "3", optional = true }
 tokio    = { version = "1", default-features = false, optional = true }
-hyper    = { version = "1", default-features = false, features = ["http1", "client", "server"], optional = true }
+hyper    = { version = "1", default-features = false, features = ["http1", "http2", "client", "server"], optional = true }
 http-body-util = { version = "0.1", optional = true }
 rustls   = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 socket2  = { version = "0.5", features = ["all"] }

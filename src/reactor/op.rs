@@ -20,7 +20,7 @@ use std::{
 
 use super::{
     slab::{ErasedBox, ErasedBuf, SlabKey},
-    REACTOR,
+    with_uring_mut,
 };
 use crate::buf::BufResult;
 
@@ -71,7 +71,7 @@ impl<B: Unpin + Send + 'static> Future for Op<B> {
 
         let key = self.key;
         // Check if reactor already completed this op and consume slot in one borrow.
-        let result = REACTOR.with(|r| r.borrow_mut().slab.poll_and_consume(key, cx.waker()));
+        let result = with_uring_mut(|r| r.slab.poll_and_consume(key, cx.waker()));
 
         match result {
             None => Poll::Pending,
@@ -105,8 +105,7 @@ impl<B: Unpin + Send + 'static> Drop for Op<B> {
             let buf = unsafe { ManuallyDrop::take(&mut self.buf) };
             let boxed: Box<dyn ErasedBuf> = Box::new(ErasedBox(buf));
 
-            REACTOR.with(|r| {
-                let mut reactor = r.borrow_mut();
+            with_uring_mut(|reactor| {
                 if reactor.slab.ignore(self.key, boxed) {
                     let _ = reactor.submit_cancel(self.key);
                 }
@@ -156,10 +155,7 @@ where
             LazyPhase::Pending(submit) => {
                 let submit_fn = submit.take().expect("LazyOp missing submit closure");
                 let buf_ref = &mut *this.buf;
-                let res = REACTOR.with(|r| {
-                    let mut reactor = r.borrow_mut();
-                    submit_fn(&mut reactor, buf_ref, cx.waker().clone())
-                });
+                let res = with_uring_mut(|reactor| submit_fn(reactor, buf_ref, cx.waker().clone()));
                 match res {
                     Ok(key) => {
                         this.phase = LazyPhase::InFlight(key);
@@ -174,7 +170,7 @@ where
             }
             LazyPhase::InFlight(key) => {
                 let k = *key;
-                let result = REACTOR.with(|r| r.borrow_mut().slab.poll_and_consume(k, cx.waker()));
+                let result = with_uring_mut(|r| r.slab.poll_and_consume(k, cx.waker()));
                 match result {
                     None => Poll::Pending,
                     Some(raw) => {
@@ -204,8 +200,7 @@ impl<B: Unpin + Send + 'static, F> Drop for LazyOp<B, F> {
             LazyPhase::InFlight(key) => {
                 let taken = unsafe { ManuallyDrop::take(&mut self.buf) };
                 let boxed: Box<dyn ErasedBuf> = Box::new(ErasedBox(taken));
-                REACTOR.with(|r| {
-                    let mut reactor = r.borrow_mut();
+                with_uring_mut(|reactor| {
                     if reactor.slab.ignore(key, boxed) {
                         let _ = reactor.submit_cancel(key);
                     }
@@ -247,9 +242,8 @@ impl Future for SimpleOp {
 
         let key = self.key;
         let this = self.get_mut();
-        REACTOR.with(|r| {
-            let mut reactor = r.borrow_mut();
-            match reactor.slab.poll_and_consume(key, cx.waker()) {
+        with_uring_mut(
+            |reactor| match reactor.slab.poll_and_consume(key, cx.waker()) {
                 None => Poll::Pending,
                 Some(result) => {
                     this.lifecycle = OpLifecycle::Complete(result);
@@ -262,16 +256,15 @@ impl Future for SimpleOp {
                         Poll::Ready(Err(io::Error::from_raw_os_error(-result)))
                     }
                 }
-            }
-        })
+            },
+        )
     }
 }
 
 impl Drop for SimpleOp {
     fn drop(&mut self) {
         if self.lifecycle == OpLifecycle::InFlight {
-            REACTOR.with(|r| {
-                let mut reactor = r.borrow_mut();
+            with_uring_mut(|reactor| {
                 if reactor.slab.ignore_simple(self.key) {
                     let _ = reactor.submit_cancel(self.key);
                 }
@@ -311,9 +304,8 @@ impl Future for AcceptOp {
 
         let key = self.key;
         let this = self.get_mut();
-        REACTOR.with(|r| {
-            let mut reactor = r.borrow_mut();
-            match reactor.slab.poll_and_consume(key, cx.waker()) {
+        with_uring_mut(
+            |reactor| match reactor.slab.poll_and_consume(key, cx.waker()) {
                 None => Poll::Pending,
                 Some(result) => {
                     this.lifecycle = OpLifecycle::Complete(result);
@@ -323,16 +315,15 @@ impl Future for AcceptOp {
                         Poll::Ready(Err(io::Error::from_raw_os_error(-result)))
                     }
                 }
-            }
-        })
+            },
+        )
     }
 }
 
 impl Drop for AcceptOp {
     fn drop(&mut self) {
         if self.lifecycle == OpLifecycle::InFlight {
-            REACTOR.with(|r| {
-                let mut reactor = r.borrow_mut();
+            with_uring_mut(|reactor| {
                 if reactor.slab.ignore_accept(self.key) {
                     let _ = reactor.submit_cancel(self.key);
                 }
@@ -372,9 +363,8 @@ impl Future for ConnectOp {
 
         let key = self.key;
         let this = self.get_mut();
-        REACTOR.with(|r| {
-            let mut reactor = r.borrow_mut();
-            match reactor.slab.poll_and_consume(key, cx.waker()) {
+        with_uring_mut(
+            |reactor| match reactor.slab.poll_and_consume(key, cx.waker()) {
                 None => Poll::Pending,
                 Some(result) => {
                     this.lifecycle = OpLifecycle::Complete(result);
@@ -384,16 +374,15 @@ impl Future for ConnectOp {
                         Poll::Ready(Err(io::Error::from_raw_os_error(-result)))
                     }
                 }
-            }
-        })
+            },
+        )
     }
 }
 
 impl Drop for ConnectOp {
     fn drop(&mut self) {
         if self.lifecycle == OpLifecycle::InFlight {
-            REACTOR.with(|r| {
-                let mut reactor = r.borrow_mut();
+            with_uring_mut(|reactor| {
                 if reactor.slab.ignore_simple(self.key) {
                     let _ = reactor.submit_cancel(self.key);
                 }

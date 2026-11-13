@@ -68,7 +68,7 @@ mod kani_harnesses {
 
         let _key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
 
         let adversarial: u64 = kani::any();
@@ -84,7 +84,7 @@ mod kani_harnesses {
 
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
 
         let index = key.index() as u64;
@@ -126,7 +126,7 @@ mod kani_harnesses {
         let mut slab = CompletionSlab::with_capacity(4);
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
 
         let still_in_flight = slab.ignore(key, Box::new(counter));
@@ -148,7 +148,7 @@ mod kani_harnesses {
         let mut slab = CompletionSlab::with_capacity(4);
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
 
         let _w1 = slab.complete(key.as_u64(), 0);
@@ -171,7 +171,7 @@ mod kani_harnesses {
         let mut slab = CompletionSlab::with_capacity(4);
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
 
         let res: i32 = kani::any();
@@ -194,7 +194,7 @@ mod kani_harnesses {
         let mut slab = CompletionSlab::with_capacity(4);
         let key1 = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
 
         let waker = std::task::Waker::noop();
@@ -211,7 +211,7 @@ mod kani_harnesses {
 
         let key2 = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
         kani::assert(key2.index() == key1.index(), "slot not reused");
         kani::assert(
@@ -235,7 +235,7 @@ mod kani_harnesses {
         let mut slab = CompletionSlab::with_capacity(4);
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(CloseOnDropFd),
+            buf: Some(Box::new(CloseOnDropFd)),
         });
 
         let still_in_flight = slab.ignore_accept(key);

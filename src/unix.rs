@@ -26,20 +26,27 @@ use crate::buf::{BufResult, IoBuf, IoBufMut};
 #[cfg(nexio_poll)]
 use super::sock::Io as Sock;
 
-/// A non-blocking socket plus the ability to wait for readiness (io_uring backend).
+/// A non-blocking socket plus the ability to wait for readiness (io_uring or runtime-fallback).
 #[cfg(nexio_uring)]
 struct Sock {
     sock: Socket,
+    #[cfg(nexio_runtime_fallback)]
+    poll_key: Option<usize>,
 }
 
 #[cfg(nexio_uring)]
 impl Drop for Sock {
     fn drop(&mut self) {
+        #[cfg(nexio_runtime_fallback)]
+        if let Some(key) = self.poll_key {
+            let _ = crate::reactor::try_with_poll_mut_impl(|r| {
+                r.deregister(key, &self.sock);
+            });
+            return;
+        }
         // Submit queued operations before the socket's descriptor is closed (see `close_fd`).
-        let _ = crate::reactor::REACTOR.try_with(|r| {
-            if let Ok(mut r) = r.try_borrow_mut() {
-                r.flush_queued();
-            }
+        let _ = crate::reactor::try_with_uring_mut(|r| {
+            r.flush_queued();
         });
     }
 }
@@ -48,13 +55,42 @@ impl Drop for Sock {
 impl Sock {
     fn new(sock: Socket) -> io::Result<Self> {
         sock.set_nonblocking(true)?;
-        Ok(Self { sock })
+        #[cfg(nexio_runtime_fallback)]
+        let poll_key = if crate::reactor::is_uring() {
+            None
+        } else {
+            let raw = sock.as_raw_fd();
+            Some(crate::reactor::with_poll_mut_impl(|r| r.register(raw))?)
+        };
+        Ok(Self {
+            sock,
+            #[cfg(nexio_runtime_fallback)]
+            poll_key,
+        })
     }
 
     async fn ready(&self, write: bool) -> io::Result<()> {
+        #[cfg(nexio_runtime_fallback)]
+        if let Some(key) = self.poll_key {
+            let mut armed = false;
+            return std::future::poll_fn(|cx| {
+                if armed {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                match crate::reactor::with_poll_mut_impl(|r| {
+                    r.arm(key, &self.sock, write, cx.waker())
+                }) {
+                    Ok(()) => {
+                        armed = true;
+                        std::task::Poll::Pending
+                    }
+                    Err(e) => std::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await;
+        }
         let fd = self.sock.as_raw_fd();
-        let op = crate::reactor::REACTOR.with(|r| {
-            let mut r = r.borrow_mut();
+        let op = crate::reactor::with_uring_mut(|r| {
             if write {
                 r.poll_writable(fd)
             } else {
@@ -99,7 +135,7 @@ impl UnixListener {
     pub fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
         let sock = Socket::new(Domain::UNIX, Type::STREAM, None)?;
         sock.bind(&SockAddr::unix(path)?)?;
-        sock.listen(1024)?;
+        sock.listen(crate::profile::HardwareProfile::get().listen_backlog())?;
         Ok(Self {
             io: Sock::new(sock)?,
         })
@@ -338,6 +374,8 @@ impl UnixStream {
         self.io.sock.as_raw_fd()
     }
 }
+
+define_stream_split!(UnixStream);
 
 // ── UnixDatagram ─────────────────────────────────────────────────────────────
 

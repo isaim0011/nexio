@@ -14,7 +14,7 @@
 
 #![cfg(nexio_uring)]
 
-use nexio::reactor::slab::{CompletionSlab, ErasedBuf, OpState, PlaceholderBuf};
+use nexio::reactor::slab::{CompletionSlab, ErasedBuf, OpState};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -63,7 +63,7 @@ fn slab_ignore_then_complete_drops_buf_once() {
     // 1. Insert as Submitted
     let key = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
 
     // 2. Future dropped: move real buf into slab as Ignored
@@ -108,7 +108,7 @@ fn slab_stale_cqe_is_discarded() {
 
     let key = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
 
     // Complete normally
@@ -136,7 +136,7 @@ fn slab_drop_after_cqe_arrived_frees_buf_immediately() {
 
     let key = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
 
     // CQE arrives before Op is polled
@@ -176,7 +176,7 @@ fn slab_concurrent_in_flight_drops_no_double_free() {
 
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(PlaceholderBuf),
+            buf: None,
         });
         keys.push(key);
 

@@ -20,6 +20,8 @@ use crate::{
     buf::{BufResult, IoBuf, IoBufMut},
 };
 
+pub use crate::fs_ops::*;
+
 fn join_err(e: crate::executor::JoinError) -> io::Error {
     io::Error::other(format!("file operation failed: {e}"))
 }
@@ -213,6 +215,127 @@ impl File {
         }
     }
 
+    /// Read into multiple buffers at `pos`.
+    pub async fn read_vectored_at<B>(&self, mut bufs: Vec<B>, pos: u64) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBufMut + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        let file = self.file.clone();
+        let job = spawn_blocking(move || {
+            let mut total_read = 0usize;
+            for b in &mut bufs {
+                match pread(&file, b, pos + total_read as u64) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        unsafe { b.set_init(n) };
+                        total_read += n;
+                        if n < b.bytes_total() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return if total_read > 0 {
+                            (Ok(total_read), bufs)
+                        } else {
+                            (Err(e), bufs)
+                        };
+                    }
+                }
+            }
+            (Ok(total_read), bufs)
+        });
+        match job.await {
+            Ok(out) => out,
+            Err(e) => panic!("{}", join_err(e)),
+        }
+    }
+
+    /// Write from multiple buffers at `pos`.
+    pub async fn write_vectored_at<B>(&self, bufs: Vec<B>, pos: u64) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        let file = self.file.clone();
+        let job = spawn_blocking(move || {
+            let mut total_written = 0usize;
+            for b in &bufs {
+                let data = unsafe { std::slice::from_raw_parts(b.stable_ptr(), b.bytes_init()) };
+                if data.is_empty() {
+                    continue;
+                }
+                match pwrite(&file, data, pos + total_written as u64) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total_written += n;
+                        if n < data.len() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return if total_written > 0 {
+                            (Ok(total_written), bufs)
+                        } else {
+                            (Err(e), bufs)
+                        };
+                    }
+                }
+            }
+            (Ok(total_written), bufs)
+        });
+        match job.await {
+            Ok(out) => out,
+            Err(e) => panic!("{}", join_err(e)),
+        }
+    }
+
+    /// Write all initialized bytes from multiple buffers at `pos`.
+    pub async fn write_all_vectored_at<B>(&self, bufs: Vec<B>, pos: u64) -> BufResult<(), Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        let file = self.file.clone();
+        let job = spawn_blocking(move || {
+            let mut file_off = pos;
+            for b in &bufs {
+                let total = b.bytes_init();
+                let mut sent = 0usize;
+                while sent < total {
+                    let data = unsafe {
+                        std::slice::from_raw_parts(b.stable_ptr().add(sent), total - sent)
+                    };
+                    match pwrite(&file, data, file_off) {
+                        Ok(0) => {
+                            return (
+                                Err(io::Error::new(
+                                    io::ErrorKind::WriteZero,
+                                    "failed to write whole vectored buffer",
+                                )),
+                                bufs,
+                            );
+                        }
+                        Ok(n) => {
+                            sent += n;
+                            file_off += n as u64;
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(e) => return (Err(e), bufs),
+                    }
+                }
+            }
+            (Ok(()), bufs)
+        });
+        match job.await {
+            Ok(out) => out,
+            Err(e) => panic!("{}", join_err(e)),
+        }
+    }
+
     /// Flush data and metadata to disk.
     pub async fn sync_all(&self) -> io::Result<()> {
         let file = self.file.clone();
@@ -225,6 +348,30 @@ impl File {
     pub async fn sync_data(&self) -> io::Result<()> {
         let file = self.file.clone();
         spawn_blocking(move || file.sync_data())
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Query metadata for this open file.
+    pub async fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        let file = self.file.clone();
+        spawn_blocking(move || file.metadata())
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Truncate or extend the underlying file to `size` bytes.
+    pub async fn set_len(&self, size: u64) -> io::Result<()> {
+        let file = self.file.clone();
+        spawn_blocking(move || file.set_len(size))
+            .await
+            .map_err(join_err)?
+    }
+
+    /// Change the permissions of the underlying file.
+    pub async fn set_permissions(&self, perm: std::fs::Permissions) -> io::Result<()> {
+        let file = self.file.clone();
+        spawn_blocking(move || file.set_permissions(perm))
             .await
             .map_err(join_err)?
     }

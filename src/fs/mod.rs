@@ -12,8 +12,10 @@ use std::{
 
 use crate::{
     buf::{BufResult, IoBuf, IoBufMut, IoBufMutExt},
-    reactor::{LazyOp, REACTOR},
+    reactor::{with_uring_mut, LazyOp},
 };
+
+pub use crate::fs_ops::*;
 
 /// An asynchronously accessed file handle backed by `io_uring`.
 pub struct File {
@@ -153,22 +155,151 @@ impl File {
         (Ok(()), buf)
     }
 
+    /// Read into multiple buffers at `pos` (`preadv`).
+    pub async fn read_vectored_at<B>(&self, bufs: Vec<B>, pos: u64) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBufMut + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        let fd = self.fd;
+        let (res, mut bufs) = LazyOp::new(bufs, move |r, bs, w| unsafe {
+            r.submit_readv_with_waker(fd, bs, pos, Some(w))
+        })
+        .await;
+        if let Ok(n) = res {
+            let mut rem = n;
+            for b in &mut bufs {
+                let take = rem.min(b.bytes_total());
+                unsafe { b.set_init(take) };
+                rem -= take;
+                if rem == 0 {
+                    break;
+                }
+            }
+        }
+        (res, bufs)
+    }
+
+    /// Write from multiple buffers at `pos` (`pwritev`).
+    pub async fn write_vectored_at<B>(&self, bufs: Vec<B>, pos: u64) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        let fd = self.fd;
+        LazyOp::new(bufs, move |r, bs, w| unsafe {
+            r.submit_writev_with_waker(fd, bs, 0, pos, Some(w))
+        })
+        .await
+    }
+
+    /// Write all initialized bytes from multiple buffers at `pos` (`pwritev`).
+    pub async fn write_all_vectored_at<B>(
+        &self,
+        mut bufs: Vec<B>,
+        pos: u64,
+    ) -> BufResult<(), Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        let fd = self.fd;
+        let mut idx = 0usize;
+        let mut off = 0usize;
+        let mut file_off = pos;
+        while idx < bufs.len() {
+            let init_len = bufs[idx].bytes_init();
+            if off >= init_len {
+                idx += 1;
+                off = 0;
+                continue;
+            }
+            let (res, out) = LazyOp::new(bufs, move |r, bs, w| unsafe {
+                r.submit_writev_with_waker(fd, &bs[idx..], off, file_off, Some(w))
+            })
+            .await;
+            bufs = out;
+            match res {
+                Ok(0) => {
+                    return (
+                        Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole vectored buffer",
+                        )),
+                        bufs,
+                    );
+                }
+                Ok(mut n) => {
+                    file_off += n as u64;
+                    while n > 0 && idx < bufs.len() {
+                        let rem = bufs[idx].bytes_init().saturating_sub(off);
+                        if n >= rem {
+                            n -= rem;
+                            idx += 1;
+                            off = 0;
+                        } else {
+                            off += n;
+                            n = 0;
+                        }
+                    }
+                }
+                Err(e) => return (Err(e), bufs),
+            }
+        }
+        (Ok(()), bufs)
+    }
+
     /// Flush all modified file data and metadata to disk (`fsync`).
     pub async fn sync_all(&self) -> io::Result<()> {
-        let op = REACTOR.with(|r| r.borrow_mut().fsync(self.fd, false))?;
+        let op = with_uring_mut(|r| r.fsync(self.fd, false))?;
         op.await.map(|_| ())
     }
 
     /// Flush all modified file data (without unnecessary metadata) to disk (`fdatasync`).
     pub async fn sync_data(&self) -> io::Result<()> {
-        let op = REACTOR.with(|r| r.borrow_mut().fsync(self.fd, true))?;
+        let op = with_uring_mut(|r| r.fsync(self.fd, true))?;
         op.await.map(|_| ())
+    }
+
+    fn dup_std_file(&self) -> io::Result<std::fs::File> {
+        let dup_fd = unsafe { libc::fcntl(self.fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if dup_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { std::fs::File::from_raw_fd(dup_fd) })
+    }
+
+    /// Query metadata for this open file.
+    pub async fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        let std_file = self.dup_std_file()?;
+        crate::blocking::spawn_blocking(move || std_file.metadata())
+            .await
+            .map_err(|e| io::Error::other(format!("file metadata failed: {e}")))?
+    }
+
+    /// Truncate or extend the underlying file to `size` bytes.
+    pub async fn set_len(&self, size: u64) -> io::Result<()> {
+        let std_file = self.dup_std_file()?;
+        crate::blocking::spawn_blocking(move || std_file.set_len(size))
+            .await
+            .map_err(|e| io::Error::other(format!("file set_len failed: {e}")))?
+    }
+
+    /// Change the permissions of the underlying file.
+    pub async fn set_permissions(&self, perm: std::fs::Permissions) -> io::Result<()> {
+        let std_file = self.dup_std_file()?;
+        crate::blocking::spawn_blocking(move || std_file.set_permissions(perm))
+            .await
+            .map_err(|e| io::Error::other(format!("file set_permissions failed: {e}")))?
     }
 
     /// Asynchronously close the file descriptor via `io_uring`.
     pub async fn close(self) -> io::Result<()> {
         let fd = self.into_raw_fd();
-        let op = REACTOR.with(|r| r.borrow_mut().close(fd))?;
+        let op = with_uring_mut(|r| r.close(fd))?;
         op.await.map(|_| ())
     }
 }
@@ -316,9 +447,8 @@ impl OpenOptions {
         }
 
         if self.noatime {
-            let op = REACTOR.with(|r| {
-                r.borrow_mut()
-                    .openat(libc::AT_FDCWD, &cpath, flags | libc::O_NOATIME, self.mode)
+            let op = with_uring_mut(|r| {
+                r.openat(libc::AT_FDCWD, &cpath, flags | libc::O_NOATIME, self.mode)
             })?;
             match op.await {
                 Ok(fd) => return Ok(File { fd }),
@@ -327,10 +457,7 @@ impl OpenOptions {
                 Err(e) => return Err(e),
             }
         }
-        let op = REACTOR.with(|r| {
-            r.borrow_mut()
-                .openat(libc::AT_FDCWD, &cpath, flags, self.mode)
-        })?;
+        let op = with_uring_mut(|r| r.openat(libc::AT_FDCWD, &cpath, flags, self.mode))?;
         let fd = op.await?;
         Ok(File { fd })
     }

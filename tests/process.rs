@@ -32,8 +32,8 @@ fn sleep_script(secs: u32) -> String {
     }
     #[cfg(windows)]
     {
-        // `ping -n N` waits about N-1 seconds.
-        format!("ping -n {} 127.0.0.1 >NUL", secs + 1)
+        // `ping` fails if ICMP is blocked by Windows Firewall; PowerShell Start-Sleep is reliable.
+        format!("powershell -NoProfile -Command \"Start-Sleep -Seconds {secs}\"")
     }
 }
 

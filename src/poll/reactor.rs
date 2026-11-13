@@ -49,13 +49,106 @@ pub struct Reactor {
     next_timer: u64,
 }
 
+#[cfg(not(nexio_runtime_fallback))]
 thread_local! {
     /// The current thread's reactor, created on first use.
     pub static REACTOR: RefCell<Reactor> =
         RefCell::new(Reactor::new().expect("failed to create the readiness poller"));
 }
 
+#[cfg(not(nexio_runtime_fallback))]
+#[inline]
+pub(crate) fn with_poll_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> R {
+    REACTOR.with(|r| f(&mut r.borrow_mut()))
+}
+
+#[cfg(not(nexio_runtime_fallback))]
+#[inline]
+pub(crate) fn try_with_poll_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> Option<R> {
+    REACTOR
+        .try_with(|r| r.try_borrow_mut().ok().map(|mut r| f(&mut r)))
+        .ok()
+        .flatten()
+}
+
+#[cfg(nexio_runtime_fallback)]
+#[inline]
+pub(crate) fn with_poll_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> R {
+    crate::reactor::with_poll_mut_impl(f)
+}
+
+#[cfg(nexio_runtime_fallback)]
+#[inline]
+pub(crate) fn try_with_poll_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> Option<R> {
+    crate::reactor::try_with_poll_mut_impl(f)
+}
+
+/// Portable builder stub matching [`crate::reactor::ReactorBuilder`] so
+/// cross-platform callers compile on both `io_uring` and `poll` backends.
+#[derive(Debug, Clone, Default)]
+pub struct ReactorBuilder {
+    entries: Option<u32>,
+}
+
+impl ReactorBuilder {
+    /// Create a new `ReactorBuilder`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ignored on the readiness backend; retained for API parity with `io_uring`.
+    pub fn entries(mut self, entries: u32) -> Self {
+        self.entries = Some(entries);
+        self
+    }
+
+    /// Ignored on the readiness backend; retained for API parity with `io_uring`.
+    pub fn coop_taskrun(self, _enabled: bool) -> Self {
+        self
+    }
+
+    /// Ignored on the readiness backend; retained for API parity with `io_uring`.
+    pub fn sqpoll(self, _idle: Option<u32>) -> Self {
+        self
+    }
+
+    /// Build the readiness [`Reactor`].
+    pub fn build(&self) -> io::Result<Reactor> {
+        Reactor::new()
+    }
+}
+
+/// Snapshot of reactor queue and source metrics for production observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReactorStats {
+    /// Number of currently registered I/O sources in the poller slab.
+    pub in_flight_ops: usize,
+    /// Number of pending timers in the reactor timer map.
+    pub pending_timers: usize,
+    /// Number of queued SQEs (`0` on the readiness poll backend).
+    pub sq_pending: usize,
+}
+
+/// Return [`ReactorStats`] for the current thread's reactor, if initialized.
+#[cfg(not(nexio_runtime_fallback))]
+pub fn current_stats() -> Option<ReactorStats> {
+    REACTOR
+        .try_with(|r| r.try_borrow().ok().map(|r| r.stats()))
+        .ok()
+        .flatten()
+}
+
 impl Reactor {
+    /// Create a builder to configure and construct a `Reactor`.
+    pub fn builder() -> ReactorBuilder {
+        ReactorBuilder::new()
+    }
+
+    /// Create a `Reactor` (the `entries` hint is accepted for parity with `io_uring`).
+    pub fn with_entries(_entries: u32) -> io::Result<Self> {
+        Self::new()
+    }
+
     /// Create a reactor with its own poller.
     pub fn new() -> io::Result<Self> {
         let poller = Arc::new(Poller::new()?);
@@ -73,6 +166,25 @@ impl Reactor {
             timers: BTreeMap::new(),
             next_timer: 0,
         })
+    }
+
+    /// Return `true` if the readiness reactor backend is supported on this host.
+    pub fn is_supported() -> bool {
+        true
+    }
+
+    /// Return the active reactor backend name (`"io_uring"` or `"poll"`).
+    pub const fn backend_name() -> &'static str {
+        "poll"
+    }
+
+    /// Return a snapshot of this reactor's registered sources and pending timers.
+    pub fn stats(&self) -> ReactorStats {
+        ReactorStats {
+            in_flight_ops: self.sources.len(),
+            pending_timers: self.timers.len(),
+            sq_pending: 0,
+        }
     }
 
     /// The mailbox pool threads use to hand results back to this thread.
@@ -133,9 +245,11 @@ impl Reactor {
         handle
     }
 
-    pub(crate) fn update_timer(&mut self, handle: TimerHandle, waker: Waker) {
+    pub(crate) fn update_timer(&mut self, handle: TimerHandle, waker: &Waker) {
         if let Some(slot) = self.timers.get_mut(&handle) {
-            *slot = waker;
+            if !slot.will_wake(waker) {
+                *slot = waker.clone();
+            }
         }
     }
 
@@ -148,20 +262,47 @@ impl Reactor {
     /// Poll without blocking: deliver ready I/O and due timers. Returns how
     /// many wakers were woken.
     pub fn submit_and_poll(&mut self) -> io::Result<usize> {
-        self.wait(Some(Duration::ZERO))
+        let mut wakers = std::mem::take(&mut self.wake_scratch);
+        let res = self.submit_and_poll_into(&mut wakers);
+        for w in wakers.drain(..) {
+            w.wake();
+        }
+        self.wake_scratch = wakers;
+        res
+    }
+
+    /// Poll without blocking, pushing I/O and timer wakers into `wakers` so
+    /// the caller can wake them outside any `RefCell` borrow.
+    pub(crate) fn submit_and_poll_into(&mut self, wakers: &mut Vec<Waker>) -> io::Result<usize> {
+        self.wait_into(Some(Duration::ZERO), wakers)
     }
 
     /// Block until I/O is ready or the next timer is due, then deliver both.
     pub fn park(&mut self) -> io::Result<usize> {
+        let mut wakers = std::mem::take(&mut self.wake_scratch);
+        let res = self.park_into(&mut wakers);
+        for w in wakers.drain(..) {
+            w.wake();
+        }
+        self.wake_scratch = wakers;
+        res
+    }
+
+    /// Block until I/O is ready or the next timer is due, pushing wakers into `wakers`.
+    pub(crate) fn park_into(&mut self, wakers: &mut Vec<Waker>) -> io::Result<usize> {
         let timeout = self
             .timers
             .keys()
             .next()
             .map(|(deadline, _)| deadline.saturating_duration_since(Instant::now()));
-        self.wait(timeout)
+        self.wait_into(timeout, wakers)
     }
 
-    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<usize> {
+    fn wait_into(
+        &mut self,
+        timeout: Option<Duration>,
+        to_wake: &mut Vec<Waker>,
+    ) -> io::Result<usize> {
         self.events.clear();
         match self.poller.wait(&mut self.events, timeout) {
             Ok(_) => {}
@@ -169,7 +310,7 @@ impl Reactor {
             Err(e) => return Err(e),
         }
 
-        let mut to_wake = std::mem::take(&mut self.wake_scratch);
+        let before = to_wake.len();
         let mut rearm = std::mem::take(&mut self.rearm_scratch);
         for ev in self.events.iter() {
             let Some(src) = self.sources.get_mut(ev.key) else {
@@ -205,11 +346,7 @@ impl Reactor {
             to_wake.push(entry.remove());
         }
 
-        let woken = to_wake.len();
-        for w in to_wake.drain(..) {
-            w.wake();
-        }
-        self.wake_scratch = to_wake;
+        let woken = to_wake.len() - before;
         self.rearm_scratch = rearm;
         // Results handed back by blocking-pool threads.
         let finished = self.mailbox.drain();

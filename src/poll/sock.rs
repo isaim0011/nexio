@@ -5,7 +5,7 @@ use std::{future::poll_fn, io, net::SocketAddr, task::Poll};
 
 use socket2::{SockAddr, Socket};
 
-use crate::reactor::REACTOR;
+use crate::reactor::{try_with_poll_mut, with_poll_mut};
 
 #[cfg(unix)]
 pub(super) fn raw(s: &Socket) -> crate::reactor::RawSource {
@@ -44,7 +44,7 @@ impl Io {
         sock.set_nonblocking(true)?;
         #[cfg(target_vendor = "apple")]
         sock.set_nosigpipe(true)?;
-        let key = REACTOR.with(|r| r.borrow_mut().register(raw(&sock)))?;
+        let key = with_poll_mut(|r| r.register(raw(&sock)))?;
         Ok(Self { sock, key })
     }
 
@@ -56,7 +56,7 @@ impl Io {
             if armed {
                 return Poll::Ready(Ok(()));
             }
-            match REACTOR.with(|r| r.borrow_mut().arm(self.key, &self.sock, write, cx.waker())) {
+            match with_poll_mut(|r| r.arm(self.key, &self.sock, write, cx.waker())) {
                 Ok(()) => {
                     armed = true;
                     Poll::Pending
@@ -81,10 +81,8 @@ impl Io {
 
 impl Drop for Io {
     fn drop(&mut self) {
-        let _ = REACTOR.try_with(|r| {
-            if let Ok(mut r) = r.try_borrow_mut() {
-                r.deregister(self.key, &self.sock);
-            }
+        let _ = try_with_poll_mut(|r| {
+            r.deregister(self.key, &self.sock);
         });
     }
 }

@@ -18,8 +18,8 @@ use std::{
 };
 
 use crate::{
-    buf::{BufResult, IoBuf, IoBufMut, IoBufMutExt},
-    reactor::REACTOR,
+    buf::{BufResult, IoBuf, IoBufMut, IoBufMutExt, IoSlice},
+    reactor::with_uring_mut,
 };
 
 // ── Helpers for sockaddr conversion ──────────────────────────────────────────
@@ -191,7 +191,8 @@ impl TcpListener {
         }
 
         // Start listening
-        let ret = unsafe { libc::listen(fd, 1024) };
+        let backlog = crate::profile::HardwareProfile::get().listen_backlog();
+        let ret = unsafe { libc::listen(fd, backlog) };
         if ret != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -403,7 +404,7 @@ impl TcpListener {
 
     /// Accept a new connection via io_uring.
     pub async fn accept(&self) -> io::Result<TcpStream> {
-        let op = REACTOR.with(|r| r.borrow_mut().accept(self.fd))?;
+        let op = with_uring_mut(|r| r.accept(self.fd))?;
         let raw_fd = op.await?;
         Ok(TcpStream { fd: raw_fd })
     }
@@ -413,6 +414,14 @@ impl TcpListener {
         let stream = self.accept().await?;
         let addr = stream.peer_addr()?;
         Ok((stream, addr))
+    }
+
+    /// Start a multishot accept stream on this listener (`IORING_OP_ACCEPT` multishot).
+    ///
+    /// Requires Linux 5.19+; on older kernels `next().await` yields `Err(EINVAL)`.
+    pub fn accept_multishot(&self) -> io::Result<MultishotTcpAccept> {
+        let inner = with_uring_mut(|r| r.accept_multishot(self.fd))?;
+        Ok(MultishotTcpAccept { inner })
     }
 
     /// Returns the raw file descriptor.
@@ -439,6 +448,21 @@ impl TcpListener {
 impl Drop for TcpListener {
     fn drop(&mut self) {
         crate::reactor::close_fd(self.fd);
+    }
+}
+
+/// Stream of accepted [`TcpStream`]s backed by io_uring multishot accept.
+pub struct MultishotTcpAccept {
+    inner: crate::reactor::MultishotAccept,
+}
+
+impl MultishotTcpAccept {
+    /// Await the next accepted [`TcpStream`], or `None` when the multishot operation terminates.
+    pub async fn next(&mut self) -> Option<io::Result<TcpStream>> {
+        self.inner
+            .next_fd()
+            .await
+            .map(|res| res.map(|fd| TcpStream { fd }))
     }
 }
 
@@ -505,7 +529,7 @@ impl TcpStream {
         }
 
         let mut guard = CloseOnDrop(fd);
-        let op = REACTOR.with(|r| r.borrow_mut().connect(fd, addr))?;
+        let op = with_uring_mut(|r| r.connect(fd, addr))?;
         op.await?;
 
         guard.0 = -1; // disarm guard
@@ -574,6 +598,12 @@ impl TcpStream {
         (res, buf)
     }
 
+    /// Start a multishot receive stream using a registered [`ProvidedBufRing`](crate::reactor::ProvidedBufRing)
+    /// buffer group (`bgid`).
+    pub fn recv_multishot(&self, bgid: u16) -> io::Result<crate::reactor::MultishotRecv> {
+        with_uring_mut(|r| r.recv_multishot(self.fd, bgid))
+    }
+
     /// Read until `buf` is full (`bytes_total()` bytes), like [`std::io::Read::read_exact`].
     ///
     /// Returns `Ok(())` once the buffer is full, or an `UnexpectedEof` error if the peer closed
@@ -637,7 +667,7 @@ impl TcpStream {
     /// Write from `buf`. Returns `BufResult<usize, B>`.
     pub async fn write<B>(&self, buf: B) -> BufResult<usize, B>
     where
-        B: IoBuf + IoBufMut + Send + 'static,
+        B: IoBuf + Send + 'static,
     {
         let fd = self.fd;
         crate::reactor::LazyOp::new(buf, move |r, b, w| unsafe {
@@ -651,7 +681,7 @@ impl TcpStream {
     /// Loops until the entire initialized length (`bytes_init()`) is written or an error occurs.
     pub async fn write_all<B>(&self, mut buf: B) -> BufResult<(), B>
     where
-        B: IoBuf + IoBufMut + Send + 'static,
+        B: IoBuf + Send + 'static,
     {
         let total = buf.bytes_init();
         if total == 0 {
@@ -677,7 +707,7 @@ impl TcpStream {
         };
 
         while written < total {
-            let slice = buf.slice(written..total);
+            let slice = IoSlice::new(buf, written, total);
             let (res, slice) = self.write(slice).await;
             buf = slice.into_inner();
 
@@ -701,6 +731,97 @@ impl TcpStream {
         }
 
         (Ok(()), buf)
+    }
+
+    /// Read from the stream into multiple buffers (`readv`).
+    pub async fn read_vectored<B>(&self, bufs: Vec<B>) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBufMut + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        let fd = self.fd;
+        let (res, mut bufs) = crate::reactor::LazyOp::new(bufs, move |r, bs, w| unsafe {
+            r.submit_readv_with_waker(fd, bs, 0, Some(w))
+        })
+        .await;
+        if let Ok(n) = res {
+            let mut rem = n;
+            for b in &mut bufs {
+                let take = rem.min(b.bytes_total());
+                unsafe { b.set_init(take) };
+                rem -= take;
+                if rem == 0 {
+                    break;
+                }
+            }
+        }
+        (res, bufs)
+    }
+
+    /// Write from multiple buffers (`writev`).
+    pub async fn write_vectored<B>(&self, bufs: Vec<B>) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        let fd = self.fd;
+        crate::reactor::LazyOp::new(bufs, move |r, bs, w| unsafe {
+            r.submit_writev_with_waker(fd, bs, 0, 0, Some(w))
+        })
+        .await
+    }
+
+    /// Write all initialized bytes from multiple buffers (`writev`), looping until complete.
+    pub async fn write_all_vectored<B>(&self, mut bufs: Vec<B>) -> BufResult<(), Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        let fd = self.fd;
+        let mut idx = 0usize;
+        let mut off = 0usize;
+        while idx < bufs.len() {
+            let init_len = bufs[idx].bytes_init();
+            if off >= init_len {
+                idx += 1;
+                off = 0;
+                continue;
+            }
+            let (res, out) = crate::reactor::LazyOp::new(bufs, move |r, bs, w| unsafe {
+                r.submit_writev_with_waker(fd, &bs[idx..], off, 0, Some(w))
+            })
+            .await;
+            bufs = out;
+            match res {
+                Ok(0) => {
+                    return (
+                        Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole vectored buffer",
+                        )),
+                        bufs,
+                    );
+                }
+                Ok(mut n) => {
+                    while n > 0 && idx < bufs.len() {
+                        let rem = bufs[idx].bytes_init().saturating_sub(off);
+                        if n >= rem {
+                            n -= rem;
+                            idx += 1;
+                            off = 0;
+                        } else {
+                            off += n;
+                            n = 0;
+                        }
+                    }
+                }
+                Err(e) => return (Err(e), bufs),
+            }
+        }
+        (Ok(()), bufs)
     }
 
     /// Sets the value of the `TCP_NODELAY` option on this socket.
@@ -1031,6 +1152,8 @@ impl AsRawFd for TcpStream {
         self.fd
     }
 }
+
+define_stream_split!(TcpStream);
 
 impl IntoRawFd for TcpStream {
     fn into_raw_fd(self) -> RawFd {

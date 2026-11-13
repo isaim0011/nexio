@@ -30,7 +30,6 @@ use std::{
 
 use crate::executor::JoinError;
 
-const MAX_THREADS: usize = 512;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── mailbox ──────────────────────────────────────────────────────────────────
@@ -135,6 +134,10 @@ struct UringMailbox {
 
 #[cfg(nexio_uring)]
 pub(crate) fn current_mailbox() -> Arc<Mailbox> {
+    #[cfg(nexio_runtime_fallback)]
+    if !crate::reactor::is_uring() {
+        return crate::reactor::with_poll_mut_impl(|p| p.mailbox());
+    }
     thread_local! {
         static MAILBOX: RefCell<Option<UringMailbox>> = const { RefCell::new(None) };
     }
@@ -252,7 +255,8 @@ impl Pool {
         // overstates how many workers are free. Compare it with the queue length
         // instead: if more jobs are waiting than there are idle workers, start another
         // thread, otherwise a burst would queue up behind the few idle ones.
-        let need_thread = st.queue.len() > st.idle && st.threads < MAX_THREADS;
+        let max_threads = crate::profile::HardwareProfile::get().blocking_max_threads();
+        let need_thread = st.queue.len() > st.idle && st.threads < max_threads;
         if st.idle > 0 {
             self.wake.notify_one();
         }
@@ -478,12 +482,18 @@ mod tests {
     fn a_dropped_task_does_not_hang_and_the_job_still_runs() {
         let ran = Arc::new(AtomicBool::new(false));
         let flag = ran.clone();
+        let check = ran.clone();
         block_on(async move {
             drop(spawn_blocking(move || {
                 thread::sleep(Duration::from_millis(50));
                 flag.store(true, Ordering::SeqCst);
             }));
-            sleep(Duration::from_millis(200)).await;
+            for _ in 0..200 {
+                if check.load(Ordering::SeqCst) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
         });
         assert!(ran.load(Ordering::SeqCst));
     }

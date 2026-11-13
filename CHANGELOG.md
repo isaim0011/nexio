@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.5 - 2026-11-14
+
+### Added
+- **Procedural macros (`nexio-macros`, default `macros` feature):** `#[nexio::main]` (with `shards = N` / `shards = "auto"`) and `#[nexio::test]`.
+- **Stream splitting:** `split()`, `into_split()`, and `reunite()` (`ReuniteError`) on `TcpStream` and `UnixStream`.
+- **Filesystem helpers (`nexio::fs`):** `read`, `write`, `metadata`, `symlink_metadata`, `remove_file`, `remove_dir`, `remove_dir_all`, `rename`, `create_dir`, `create_dir_all`, `copy`, `set_permissions`, `read_dir` (`ReadDir`, `DirEntry`), plus `File::{metadata, set_len, set_permissions}`.
+- **Vectored I/O:** `TcpStream::{read_vectored, write_vectored, write_all_vectored}` and `File::{read_vectored_at, write_vectored_at, write_all_vectored_at}` across `io_uring` and `poll`.
+- **Async sync primitives (`nexio::sync`):** `Notify`, `Semaphore`, `Mutex`, `RwLock`, `watch`, `broadcast`, `CancellationToken`, and re-exports of `oneshot` and `mpsc`.
+- **HTTP/2 & Server ergonomics (`nexio::http`):** Enabled `hyper` `http2` support and added `LocalExec`, `serve_http2_connection`, and `Server::{bind, from_listener, local_addr, serve, serve_with_shutdown}`.
+- **Timer ergonomics (`nexio::time`):** Public `Sleep` (`deadline()`, `is_elapsed()`, `reset()`), `timeout_at`, `interval_at`, and `MissedTickBehavior::{Burst, Delay, Skip}`.
+- **Runtime `io_uring` availability & fallback:** Added `nexio::io_uring_available()` and optional `runtime-fallback` feature so Linux binaries can automatically fall back to `epoll` (`polling`) when `io_uring_setup` is blocked (`EPERM`/`ENOSYS`/`EACCES`).
+- **Multishot I/O & provided buffer rings (`io_uring`):** Added `ProvidedBufRing` (`IORING_REGISTER_PBUF_RING`), `TcpListener::accept_multishot`, and `TcpStream::recv_multishot`.
+- **Observability:** Added `ReactorStats`, `Reactor::stats()`, `Reactor::backend_name()`, and `current_stats()`.
+
+### Changed
+- Replaced the `no-coop-taskrun` Cargo feature with `coop-taskrun` to match `ReactorBuilder::coop_taskrun`.
+
 ## 0.2.4 - 2026-11-13
 
 ### Changed

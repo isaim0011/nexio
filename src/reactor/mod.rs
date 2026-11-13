@@ -4,6 +4,7 @@
 //! Multi-core scale-out: N independent reactors + SO_REUSEPORT sharding.
 
 pub mod builder;
+pub mod multishot;
 /// Internal operation futures. Public so external verification harnesses can reach them;
 /// **not covered by semver** and not part of nexio's supported API.
 #[doc(hidden)]
@@ -13,28 +14,124 @@ pub mod op;
 #[doc(hidden)]
 pub mod slab;
 
-use std::{cell::RefCell, ffi::CStr, io, net::SocketAddr, os::unix::io::RawFd, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    ffi::CStr,
+    io,
+    net::SocketAddr,
+    os::unix::io::RawFd,
+    task::Waker,
+    time::{Duration, Instant},
+};
 
 use io_uring::{opcode, types, IoUring};
 use slab::{CompletionSlab, OpState, SlabKey};
 
 pub use builder::ReactorBuilder;
+pub use multishot::{MultishotAccept, MultishotChunk, MultishotRecv, ProvidedBufRing};
 #[doc(hidden)]
 pub use op::{AcceptOp, ConnectOp, LazyOp, Op, SimpleOp};
 
 // ── Thread-local handle ───────────────────────────────────────────────────────
 
+#[cfg(not(nexio_runtime_fallback))]
 thread_local! {
-    pub(crate) static REACTOR: RefCell<Reactor> =
-        RefCell::new(Reactor::new().expect("failed to initialise io_uring reactor"));
+    pub(crate) static REACTOR: RefCell<Reactor> = RefCell::new(Reactor::new().unwrap_or_else(|err| {
+        match err.raw_os_error() {
+            Some(libc::EPERM | libc::ENOSYS | libc::EACCES) => panic!(
+                "failed to initialise io_uring reactor ({err}): `io_uring_setup` appears \
+                 blocked by seccomp or `kernel.io_uring_disabled`; rebuild with `--features poll` \
+                 or `--features runtime-fallback` to use the portable epoll fallback"
+            ),
+            _ => panic!("failed to initialise io_uring reactor: {err}"),
+        }
+    }));
+}
+
+#[cfg(not(nexio_runtime_fallback))]
+#[inline]
+pub(crate) fn with_uring<R>(f: impl FnOnce(&Reactor) -> R) -> R {
+    REACTOR.with(|r| f(&r.borrow()))
+}
+
+#[cfg(not(nexio_runtime_fallback))]
+#[inline]
+pub(crate) fn with_uring_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> R {
+    REACTOR.with(|r| f(&mut r.borrow_mut()))
+}
+
+#[cfg(not(nexio_runtime_fallback))]
+#[inline]
+pub(crate) fn try_with_uring<R>(f: impl FnOnce(&Reactor) -> R) -> Option<R> {
+    REACTOR
+        .try_with(|r| r.try_borrow().ok().map(|r| f(&r)))
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(nexio_runtime_fallback))]
+#[inline]
+pub(crate) fn try_with_uring_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> Option<R> {
+    REACTOR
+        .try_with(|r| r.try_borrow_mut().ok().map(|mut r| f(&mut r)))
+        .ok()
+        .flatten()
+}
+
+#[cfg(nexio_runtime_fallback)]
+#[inline]
+pub(crate) fn with_uring<R>(f: impl FnOnce(&Reactor) -> R) -> R {
+    crate::reactor::with_uring_impl(f)
+}
+
+#[cfg(nexio_runtime_fallback)]
+#[inline]
+pub(crate) fn with_uring_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> R {
+    crate::reactor::with_uring_mut_impl(f)
+}
+
+#[cfg(nexio_runtime_fallback)]
+#[inline]
+pub(crate) fn try_with_uring<R>(f: impl FnOnce(&Reactor) -> R) -> Option<R> {
+    crate::reactor::try_with_uring_impl(f)
+}
+
+#[cfg(nexio_runtime_fallback)]
+#[inline]
+pub(crate) fn try_with_uring_mut<R>(f: impl FnOnce(&mut Reactor) -> R) -> Option<R> {
+    crate::reactor::try_with_uring_mut_impl(f)
 }
 
 // ── Reactor ───────────────────────────────────────────────────────────────────
+
+/// Reserved `user_data` for internal `ASYNC_CANCEL` and fallback timer SQEs.
+const INTERNAL_CANCEL_UD: u64 = u64::MAX;
+const INTERNAL_TIMER_UD: u64 = u64::MAX - 1;
 
 /// Thread-local io_uring driver and completion tracker.
 pub struct Reactor {
     ring: IoUring,
     pub(crate) slab: CompletionSlab,
+    pub(crate) multishot_ops: ::slab::Slab<multishot::MultishotSlot>,
+    timers: BTreeMap<(Instant, u64), Waker>,
+    next_timer_id: u64,
+}
+
+/// Snapshot of reactor queue and slab metrics for production observability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReactorStats {
+    /// Number of currently active in-flight operations in the reactor slab.
+    pub in_flight_ops: usize,
+    /// Number of pending timers in the reactor timer map.
+    pub pending_timers: usize,
+    /// Number of queued SQEs not yet submitted to the kernel.
+    pub sq_pending: usize,
+}
+
+/// Return [`ReactorStats`] for the current thread's reactor, if initialized.
+pub fn current_stats() -> Option<ReactorStats> {
+    try_with_uring(|r| r.stats())
 }
 
 impl Reactor {
@@ -48,12 +145,38 @@ impl Reactor {
         ReactorBuilder::new().entries(entries).build()
     }
 
-    /// Create a new `Reactor` instance with a queue depth of 1024.
+    /// Create a new `Reactor` instance with hardware-adaptive queue depth.
     ///
-    /// Automatically enables `COOP_TASKRUN` / `DEFER_TASKRUN` / `SINGLE_ISSUER`
-    /// on kernels that support them (Linux 6.1+), falling back cleanly on older kernels.
+    /// Steps down queue depth on `ENOMEM` when `RLIMIT_MEMLOCK` is tight.
+    /// Cooperative taskrun flags (`COOP_TASKRUN` / `DEFER_TASKRUN` / `SINGLE_ISSUER`)
+    /// can be enabled via [`ReactorBuilder::coop_taskrun`](crate::reactor::ReactorBuilder::coop_taskrun).
     pub fn new() -> io::Result<Self> {
         ReactorBuilder::new().build()
+    }
+
+    /// Return `true` if `io_uring` can be initialized in the current process/sandbox.
+    ///
+    /// Returns `false` when `io_uring_setup` is blocked (e.g. by seccomp or
+    /// `kernel.io_uring_disabled`) or cannot allocate even a minimal ring.
+    pub fn is_supported() -> bool {
+        Self::with_entries(16).is_ok()
+    }
+
+    /// Return the active reactor backend name (`"io_uring"` or `"poll"`).
+    pub const fn backend_name() -> &'static str {
+        "io_uring"
+    }
+
+    /// Return a snapshot of this reactor's active operations, timers, and queued SQEs.
+    pub fn stats(&self) -> ReactorStats {
+        // SAFETY: `Reactor` is single-threaded (`!Send`), and `&self` ensures no
+        // concurrent mutable borrow of `self.ring` is active on this thread.
+        let sq_pending = unsafe { self.ring.submission_shared().len() };
+        ReactorStats {
+            in_flight_ops: self.slab.len(),
+            pending_timers: self.timers.len(),
+            sq_pending,
+        }
     }
 
     /// Temporarily install `self` as the current thread's active reactor for the
@@ -62,6 +185,7 @@ impl Reactor {
     /// This allows running `nexio::block_on`, `nexio::net`, `nexio::fs`, and
     /// `nexio::time` on a custom [`Reactor`] (e.g., from [`Reactor::builder`] or
     /// [`Reactor::with_entries`]).
+    #[cfg(not(nexio_runtime_fallback))]
     pub fn enter<R>(&mut self, f: impl FnOnce() -> R) -> R {
         struct RestoreGuard<'a>(&'a mut Reactor);
         impl Drop for RestoreGuard<'_> {
@@ -74,6 +198,28 @@ impl Reactor {
         let out = f();
         drop(guard);
         out
+    }
+
+    /// Internal helper to push a pre-tagged SQE with retries on SQ full / EINTR.
+    pub(crate) fn push_raw_sqe(&mut self, sqe: io_uring::squeue::Entry) -> io::Result<()> {
+        unsafe {
+            if self.ring.submission().push(&sqe).is_err() {
+                loop {
+                    match self.ring.submit() {
+                        Ok(_) => break,
+                        Err(ref e) if e.raw_os_error() == Some(libc::EINTR) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                if self.ring.submission().push(&sqe).is_err() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "submission queue is full",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Internal helper to push an SQE with retries on SQ full / EINTR.
@@ -146,10 +292,7 @@ impl Reactor {
         .offset(offset)
         .build();
 
-        let key = self.slab.insert(OpState::Submitted {
-            waker,
-            buf: Box::new(slab::PlaceholderBuf),
-        });
+        let key = self.slab.insert(OpState::Submitted { waker, buf: None });
 
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -189,10 +332,7 @@ impl Reactor {
             .offset(offset)
             .build();
 
-        let key = self.slab.insert(OpState::Submitted {
-            waker,
-            buf: Box::new(slab::PlaceholderBuf),
-        });
+        let key = self.slab.insert(OpState::Submitted { waker, buf: None });
 
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -218,10 +358,7 @@ impl Reactor {
         )
         .build();
 
-        let key = self.slab.insert(OpState::Submitted {
-            waker,
-            buf: Box::new(slab::PlaceholderBuf),
-        });
+        let key = self.slab.insert(OpState::Submitted { waker, buf: None });
 
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -243,11 +380,89 @@ impl Reactor {
         let sqe =
             opcode::Send::new(types::Fd(fd), buf.stable_ptr(), buf.bytes_init() as u32).build();
 
+        let key = self.slab.insert(OpState::Submitted { waker, buf: None });
+
+        self.push_sqe(sqe, key)?;
+        Ok(key)
+    }
+
+    /// Submit a vectored `Readv` SQE with an optional pre-registered waker.
+    ///
+    /// # Safety
+    /// Same lifetime guarantees as `submit_read` for every buffer in `bufs`.
+    pub(crate) unsafe fn submit_readv_with_waker<B>(
+        &mut self,
+        fd: RawFd,
+        bufs: &mut [B],
+        offset: u64,
+        waker: Option<std::task::Waker>,
+    ) -> io::Result<SlabKey>
+    where
+        B: crate::buf::IoBufMut + Send + 'static,
+    {
+        let iovecs: Vec<libc::iovec> = bufs
+            .iter_mut()
+            .map(|b| libc::iovec {
+                iov_base: b.stable_ptr_mut() as *mut libc::c_void,
+                iov_len: b.bytes_total(),
+            })
+            .collect();
+        let len = iovecs.len() as u32;
+        let storage = Box::new(slab::IovecsStorage(iovecs));
+        let ptr = storage.0.as_ptr();
+        let sqe = opcode::Readv::new(types::Fd(fd), ptr, len)
+            .offset(offset)
+            .build();
         let key = self.slab.insert(OpState::Submitted {
             waker,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: Some(storage),
         });
+        self.push_sqe(sqe, key)?;
+        Ok(key)
+    }
 
+    /// Submit a vectored `Writev` SQE with an optional pre-registered waker.
+    ///
+    /// # Safety
+    /// Same lifetime guarantees as `submit_write` for every buffer in `bufs`.
+    pub(crate) unsafe fn submit_writev_with_waker<B>(
+        &mut self,
+        fd: RawFd,
+        bufs: &[B],
+        first_offset: usize,
+        offset: u64,
+        waker: Option<std::task::Waker>,
+    ) -> io::Result<SlabKey>
+    where
+        B: crate::buf::IoBuf + Send + 'static,
+    {
+        let iovecs: Vec<libc::iovec> = bufs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let skip = if i == 0 { first_offset } else { 0 };
+                let len = b.bytes_init().saturating_sub(skip);
+                let ptr = if len == 0 {
+                    std::ptr::null_mut()
+                } else {
+                    unsafe { b.stable_ptr().add(skip) as *mut libc::c_void }
+                };
+                libc::iovec {
+                    iov_base: ptr,
+                    iov_len: len,
+                }
+            })
+            .collect();
+        let len = iovecs.len() as u32;
+        let storage = Box::new(slab::IovecsStorage(iovecs));
+        let ptr = storage.0.as_ptr();
+        let sqe = opcode::Writev::new(types::Fd(fd), ptr, len)
+            .offset(offset)
+            .build();
+        let key = self.slab.insert(OpState::Submitted {
+            waker,
+            buf: Some(storage),
+        });
         self.push_sqe(sqe, key)?;
         Ok(key)
     }
@@ -256,11 +471,12 @@ impl Reactor {
     pub(crate) fn submit_accept(&mut self, fd: RawFd) -> io::Result<SlabKey> {
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::CloseOnDropFd),
+            buf: Some(Box::new(slab::CloseOnDropFd)),
         });
 
-        let sqe =
-            opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut()).build();
+        let sqe = opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
+            .flags(libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK)
+            .build();
 
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -274,7 +490,7 @@ impl Reactor {
 
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: storage_box,
+            buf: Some(storage_box),
         });
 
         let sqe = opcode::Connect::new(types::Fd(fd), ptr, len).build();
@@ -304,7 +520,7 @@ impl Reactor {
 
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
 
         self.push_sqe(sqe, key)?;
@@ -333,7 +549,7 @@ impl Reactor {
 
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
 
         self.push_sqe(sqe, key)?;
@@ -359,7 +575,7 @@ impl Reactor {
         let ptr = msg_data.as_msghdr_ptr();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: msg_data,
+            buf: Some(msg_data),
         });
 
         let sqe = opcode::SendMsg::new(types::Fd(fd), ptr)
@@ -383,7 +599,7 @@ impl Reactor {
         let ptr = msg_data.as_msghdr_mut_ptr();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: msg_data,
+            buf: Some(msg_data),
         });
 
         let sqe = opcode::RecvMsg::new(types::Fd(fd), ptr)
@@ -402,7 +618,7 @@ impl Reactor {
         let ptr = &ts_box.0 as *const types::Timespec;
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: ts_box,
+            buf: Some(ts_box),
         });
 
         let sqe = opcode::Timeout::new(ptr).build();
@@ -416,7 +632,7 @@ impl Reactor {
         let ptr = &ts_box.0 as *const types::Timespec;
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: ts_box,
+            buf: Some(ts_box),
         });
 
         let sqe = opcode::Timeout::new(ptr)
@@ -435,7 +651,7 @@ impl Reactor {
         let sqe = fsync.build();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -447,7 +663,7 @@ impl Reactor {
         let sqe = opcode::PollAdd::new(types::Fd(fd), events).build();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -467,7 +683,7 @@ impl Reactor {
         let ptr = open_data.path.as_ptr();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: open_data,
+            buf: Some(open_data),
         });
 
         let sqe = opcode::OpenAt::new(types::Fd(dirfd), ptr)
@@ -483,7 +699,7 @@ impl Reactor {
         let sqe = opcode::Close::new(types::Fd(fd)).build();
         let key = self.slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
         self.push_sqe(sqe, key)?;
         Ok(key)
@@ -683,11 +899,73 @@ impl Reactor {
         self.ring.submitter().unregister_files()
     }
 
+    /// Register a provided buffer ring (`IORING_REGISTER_PBUF_RING`).
+    pub(crate) fn register_buf_ring(&self, addr: u64, entries: u16, bgid: u16) -> io::Result<()> {
+        // SAFETY: caller provides a valid page-aligned `BufRingEntry` ring of `entries` slots.
+        unsafe { self.ring.submitter().register_buf_ring(addr, entries, bgid) }
+    }
+
+    /// Unregister a previously registered provided buffer ring.
+    pub(crate) fn unregister_buf_ring(&self, bgid: u16) -> io::Result<()> {
+        self.ring.submitter().unregister_buf_ring(bgid)
+    }
+
+    /// Start a multishot accept operation on `fd`.
+    pub fn accept_multishot(&mut self, fd: RawFd) -> io::Result<MultishotAccept> {
+        let idx = self
+            .multishot_ops
+            .insert(multishot::MultishotSlot::new(true));
+        let ud = multishot::MULTISHOT_UD_BASE + idx as u64;
+        let sqe = opcode::AcceptMulti::new(types::Fd(fd))
+            .build()
+            .user_data(ud);
+        if let Err(e) = self.push_raw_sqe(sqe) {
+            self.multishot_ops.remove(idx);
+            return Err(e);
+        }
+        // Construct via helper? Wait: MultishotAccept has private `slot_idx`. Let's use `MultishotAccept::from_slot`.
+        Ok(MultishotAccept::from_slot(idx))
+    }
+
+    /// Start a multishot receive operation on `fd` using provided buffer group `bgid`.
+    pub fn recv_multishot(&mut self, fd: RawFd, bgid: u16) -> io::Result<MultishotRecv> {
+        let idx = self
+            .multishot_ops
+            .insert(multishot::MultishotSlot::new(false));
+        let ud = multishot::MULTISHOT_UD_BASE + idx as u64;
+        let sqe = opcode::RecvMulti::new(types::Fd(fd), bgid)
+            .build()
+            .user_data(ud);
+        if let Err(e) = self.push_raw_sqe(sqe) {
+            self.multishot_ops.remove(idx);
+            return Err(e);
+        }
+        Ok(MultishotRecv::from_slot(idx))
+    }
+
+    fn complete_multishot_slot(
+        multishot_ops: &mut ::slab::Slab<multishot::MultishotSlot>,
+        idx: usize,
+        result: i32,
+        flags: u32,
+    ) -> Option<Waker> {
+        let (waker, remove) = multishot_ops.get_mut(idx)?.on_cqe(result, flags);
+        if remove {
+            multishot_ops.remove(idx);
+        }
+        waker
+    }
+
     // ── Poll / park ───────────────────────────────────────────────────────────
 
     /// Drain already-ready CQEs from userspace without a syscall.
     pub fn drain_ready(&mut self) -> io::Result<usize> {
-        self.drain_completions()
+        let mut wakers = Vec::new();
+        let count = self.drain_completions_into(&mut wakers)?;
+        for w in wakers {
+            w.wake();
+        }
+        Ok(count)
     }
 
     /// Hand every queued SQE to the kernel without waiting for completions.
@@ -697,9 +975,65 @@ impl Reactor {
 
     /// Flush buffered SQEs and drain available CQEs without blocking.
     pub fn submit_and_poll(&mut self) -> io::Result<usize> {
-        // Note: submit_and_wait(0) submits pending SQEs and runs deferred task_work
-        // in one syscall without blocking. If SQ is empty and CQ already has items,
-        // drain them first; otherwise issue a non-blocking enter(0) to flush SQ/task_work.
+        let mut wakers = Vec::new();
+        let count = self.submit_and_poll_into(&mut wakers)?;
+        for w in wakers {
+            w.wake();
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn add_timer(&mut self, deadline: Instant, waker: Waker) -> (Instant, u64) {
+        let id = self.next_timer_id;
+        self.next_timer_id = self.next_timer_id.wrapping_add(1);
+        let key = (deadline, id);
+        self.timers.insert(key, waker);
+        key
+    }
+
+    pub(crate) fn update_timer(&mut self, key: (Instant, u64), waker: &Waker) {
+        if let Some(slot) = self.timers.get_mut(&key) {
+            if !slot.will_wake(waker) {
+                *slot = waker.clone();
+            }
+        }
+    }
+
+    pub(crate) fn cancel_timer(&mut self, key: (Instant, u64)) {
+        self.timers.remove(&key);
+    }
+
+    fn drain_timers_into(&mut self, wakers: &mut Vec<Waker>) -> usize {
+        if self.timers.is_empty() {
+            return 0;
+        }
+        let now = Instant::now();
+        let mut fired = 0;
+        while let Some(entry) = self.timers.first_entry() {
+            if entry.key().0 > now {
+                break;
+            }
+            wakers.push(entry.remove());
+            fired += 1;
+        }
+        fired
+    }
+
+    /// Flush buffered SQEs and drain available CQEs without blocking,
+    /// collecting woken [`Waker`](std::task::Waker)s into `wakers` so the
+    /// caller can wake them after releasing any `RefCell` borrow on the reactor.
+    pub(crate) fn submit_and_poll_into(
+        &mut self,
+        wakers: &mut Vec<std::task::Waker>,
+    ) -> io::Result<usize> {
+        // Fast path: if no SQEs are queued and CQEs are already waiting,
+        // drain them without an unnecessary io_uring_enter(0) syscall.
+        if self.ring.submission().is_empty() && !self.ring.completion().is_empty() {
+            let n = self.drain_completions_into(wakers)?;
+            let t = self.drain_timers_into(wakers);
+            return Ok(n + t);
+        }
+        // Otherwise submit pending SQEs and run deferred task_work in one syscall.
         loop {
             match self.ring.submit_and_wait(0) {
                 Ok(_) => break,
@@ -707,11 +1041,75 @@ impl Reactor {
                 Err(e) => return Err(e),
             }
         }
-        self.drain_completions()
+        let n = self.drain_completions_into(wakers)?;
+        let t = self.drain_timers_into(wakers);
+        Ok(n + t)
     }
 
     /// Block until at least one CQE is available, then drain all.
     pub fn park(&mut self) -> io::Result<usize> {
+        let mut wakers = Vec::new();
+        let count = self.park_into(&mut wakers)?;
+        for w in wakers {
+            w.wake();
+        }
+        Ok(count)
+    }
+
+    /// Block until at least one CQE is available or the next timer expires,
+    /// draining completions and collecting woken [`Waker`](std::task::Waker)s into `wakers`.
+    pub(crate) fn park_into(&mut self, wakers: &mut Vec<std::task::Waker>) -> io::Result<usize> {
+        if let Some(&(next_deadline, _)) = self.timers.keys().next() {
+            let now = Instant::now();
+            if next_deadline <= now {
+                let n = self.submit_and_poll_into(wakers)?;
+                return Ok(n);
+            }
+            let dur = next_deadline - now;
+            if self.ring.params().is_feature_ext_arg() {
+                let ts = types::Timespec::new()
+                    .sec(dur.as_secs())
+                    .nsec(dur.subsec_nanos());
+                let args = types::SubmitArgs::new().timespec(&ts);
+                loop {
+                    match self.ring.submitter().submit_with_args(1, &args) {
+                        Ok(_) => break,
+                        Err(ref e)
+                            if e.raw_os_error() == Some(libc::EINTR)
+                                || e.raw_os_error() == Some(libc::ETIME) =>
+                        {
+                            if e.raw_os_error() == Some(libc::ETIME) {
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                let ts = types::Timespec::new()
+                    .sec(dur.as_secs())
+                    .nsec(dur.subsec_nanos());
+                let sqe = opcode::Timeout::new(&ts)
+                    .build()
+                    .user_data(INTERNAL_TIMER_UD);
+                if unsafe { self.ring.submission().push(&sqe) }.is_err() {
+                    let _ = self.ring.submit();
+                    let _ = unsafe { self.ring.submission().push(&sqe) };
+                }
+                loop {
+                    match self.ring.submit_and_wait(1) {
+                        Ok(_) => break,
+                        Err(ref e) if e.raw_os_error() == Some(libc::EINTR) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            let n = self.drain_completions_into(wakers)?;
+            let t = self.drain_timers_into(wakers);
+            return Ok(n + t);
+        }
+
         loop {
             match self.ring.submit_and_wait(1) {
                 Ok(_) => break,
@@ -719,19 +1117,31 @@ impl Reactor {
                 Err(e) => return Err(e),
             }
         }
-        self.drain_completions()
+        self.drain_completions_into(wakers)
     }
 
-    fn drain_completions(&mut self) -> io::Result<usize> {
+    fn drain_completions_into(&mut self, wakers: &mut Vec<std::task::Waker>) -> io::Result<usize> {
         let mut count = 0;
         // Process each CQE exactly once
         for cqe in self.ring.completion() {
             let user_data = cqe.user_data();
-            if user_data == u64::MAX {
-                continue; // ASYNC_CANCEL completion — ignore
+            if user_data == INTERNAL_CANCEL_UD || user_data == INTERNAL_TIMER_UD {
+                continue; // ASYNC_CANCEL or internal park timer completion — ignore
+            }
+            if user_data >= multishot::MULTISHOT_UD_BASE {
+                let idx = (user_data - multishot::MULTISHOT_UD_BASE) as usize;
+                let res = cqe.result();
+                let flags = cqe.flags();
+                if let Some(waker) =
+                    Self::complete_multishot_slot(&mut self.multishot_ops, idx, res, flags)
+                {
+                    wakers.push(waker);
+                }
+                count += 1;
+                continue;
             }
             if let Some(waker) = self.slab.complete(user_data, cqe.result()) {
-                waker.wake();
+                wakers.push(waker);
             }
             count += 1;
         }
@@ -750,10 +1160,8 @@ pub(crate) fn close_fd(fd: std::os::fd::RawFd) {
     if fd < 0 {
         return;
     }
-    let _ = REACTOR.try_with(|r| {
-        if let Ok(mut r) = r.try_borrow_mut() {
-            r.flush_queued();
-        }
+    let _ = try_with_uring_mut(|r| {
+        r.flush_queued();
     });
     // SAFETY: the caller owns `fd` and never uses it again.
     unsafe { libc::close(fd) };
@@ -812,7 +1220,7 @@ fn socket_addr_to_libc(addr: SocketAddr) -> (libc::sockaddr_storage, libc::sockl
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, not(nexio_runtime_fallback)))]
 mod tests {
     use super::*;
     use std::sync::{
@@ -858,7 +1266,7 @@ mod tests {
 
         let key0 = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
         assert_eq!(key0.index(), 0);
         assert_eq!(key0.generation(), 0);
@@ -871,7 +1279,7 @@ mod tests {
         // Next insert at slot 0 should have generation 1
         let key1 = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::PlaceholderBuf),
+            buf: None,
         });
         assert_eq!(key1.index(), 0);
         assert_eq!(key1.generation(), 1);
@@ -895,7 +1303,7 @@ mod tests {
         // Simulate an accept operation submitted
         let key = slab.insert(OpState::Submitted {
             waker: None,
-            buf: Box::new(slab::CloseOnDropFd),
+            buf: Some(Box::new(slab::CloseOnDropFd)),
         });
 
         // Op dropped before completion -> ignored

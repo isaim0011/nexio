@@ -102,12 +102,21 @@ impl<S: Duplex> TlsStream<S> {
 
     /// Read some ciphertext from the transport and hand it to rustls.
     async fn fill_tls(&self) -> io::Result<()> {
-        let (res, buf) = self
-            .io
-            .clone()
-            .read_owned(Vec::with_capacity(READ_CHUNK))
-            .await;
-        let n = res?;
+        let mut buf = self.read_spare.take();
+        buf.clear();
+        if buf.capacity() < READ_CHUNK {
+            buf.reserve(READ_CHUNK - buf.len());
+        }
+        let (res, mut buf) = self.io.clone().read_owned(buf).await;
+        let n = match res {
+            Ok(n) => n,
+            Err(e) => {
+                buf.clear();
+                self.read_spare.set(buf);
+                return Err(e);
+            }
+        };
+        let mut io_err: Option<io::Error> = None;
         let outcome: Result<(), rustls::Error> = {
             let mut c = self.conn.borrow_mut();
             if n == 0 {
@@ -123,7 +132,10 @@ impl<S: Duplex> TlsStream<S> {
                     match c.read_tls(&mut rest) {
                         Ok(0) => break,
                         Ok(_) => {}
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            io_err = Some(e);
+                            break;
+                        }
                     }
                     if let Err(e) = c.process_new_packets() {
                         result = Err(e);
@@ -133,6 +145,11 @@ impl<S: Duplex> TlsStream<S> {
                 result
             }
         };
+        buf.clear();
+        self.read_spare.set(buf);
+        if let Some(e) = io_err {
+            return Err(e);
+        }
         match outcome {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -313,19 +330,20 @@ impl Unpin for TailBuf {}
 
 impl<S: Duplex> sealed::Sealed for TlsStream<S> {}
 
+#[allow(clippy::manual_async_fn)]
 impl<S: Duplex> Duplex for TlsStream<S> {
     fn read_owned(
         self: Rc<Self>,
         buf: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = (io::Result<usize>, Vec<u8>)>>> {
-        Box::pin(async move { self.read(buf).await })
+    ) -> impl Future<Output = (io::Result<usize>, Vec<u8>)> + 'static {
+        async move { self.read(buf).await }
     }
 
     fn write_all_owned(
         self: Rc<Self>,
         buf: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = (io::Result<usize>, Vec<u8>)>>> {
-        Box::pin(async move { self.write(buf).await })
+    ) -> impl Future<Output = (io::Result<usize>, Vec<u8>)> + 'static {
+        async move { self.write(buf).await }
     }
 
     fn shutdown_owned(self: Rc<Self>) -> Pin<Box<dyn Future<Output = io::Result<()>>>> {

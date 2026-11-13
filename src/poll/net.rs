@@ -22,7 +22,7 @@ use std::{
 pub use crate::addr::{lookup_host, ToAddrs};
 mod sock;
 mod udp;
-#[cfg(unix)]
+#[cfg(all(unix, not(nexio_runtime_fallback)))]
 #[path = "../unix.rs"]
 pub mod unix;
 #[cfg(unix)]
@@ -30,7 +30,7 @@ use sock::raw;
 use sock::{is_in_progress, socket_addr, Io};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 pub use udp::UdpSocket;
-#[cfg(unix)]
+#[cfg(all(unix, not(nexio_runtime_fallback)))]
 pub use unix::{UnixDatagram, UnixListener, UnixStream};
 
 use crate::buf::{BufResult, IoBuf, IoBufMut};
@@ -69,7 +69,7 @@ impl TcpListener {
         #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
         sock.set_reuse_port(true)?;
         sock.bind(&SockAddr::from(addr))?;
-        sock.listen(1024)?;
+        sock.listen(crate::profile::HardwareProfile::get().listen_backlog())?;
         Ok(Self { io: Io::new(sock)? })
     }
 
@@ -102,6 +102,36 @@ impl TcpListener {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Try to accept a pending connection without blocking.
+    ///
+    /// Returns `Err(WouldBlock)` if no connection is ready.
+    pub fn try_accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+        let (sock, peer) = self.io.sock.accept()?;
+        Ok((TcpStream { io: Io::new(sock)? }, socket_addr(peer)?))
+    }
+
+    /// Enable or disable `SO_REUSEADDR`.
+    pub fn set_reuseaddr(&self, reuse: bool) -> io::Result<()> {
+        self.io.sock.set_reuse_address(reuse)
+    }
+
+    /// Query `SO_REUSEADDR`.
+    pub fn reuseaddr(&self) -> io::Result<bool> {
+        self.io.sock.reuse_address()
+    }
+
+    /// Enable or disable `SO_REUSEPORT` (Unix only).
+    #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
+    pub fn set_reuseport(&self, reuse: bool) -> io::Result<()> {
+        self.io.sock.set_reuse_port(reuse)
+    }
+
+    /// Query `SO_REUSEPORT` (Unix only).
+    #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
+    pub fn reuseport(&self) -> io::Result<bool> {
+        self.io.sock.reuse_port()
     }
 
     /// Set the IP time-to-live for packets sent from accepted sockets.
@@ -306,6 +336,155 @@ impl TcpStream {
         (Ok(()), buf)
     }
 
+    /// Read from the stream into multiple buffers (`recv_vectored`).
+    pub async fn read_vectored<B>(&self, mut bufs: Vec<B>) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBufMut + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        loop {
+            let mut slices: Vec<std::io::IoSliceMut<'_>> = bufs
+                .iter_mut()
+                .map(|b| {
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(b.stable_ptr_mut(), b.bytes_total())
+                    };
+                    std::io::IoSliceMut::new(slice)
+                })
+                .collect();
+            let res = {
+                use std::io::Read;
+                (&self.io.sock).read_vectored(&mut slices)
+            };
+            drop(slices);
+            match res {
+                Ok(n) => {
+                    let mut rem = n;
+                    for b in &mut bufs {
+                        let take = rem.min(b.bytes_total());
+                        unsafe { b.set_init(take) };
+                        rem -= take;
+                        if rem == 0 {
+                            break;
+                        }
+                    }
+                    return (Ok(n), bufs);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.io.ready(false).await {
+                        return (Err(e), bufs);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (Err(e), bufs),
+            }
+        }
+    }
+
+    /// Write from multiple buffers (`send_vectored`).
+    pub async fn write_vectored<B>(&self, bufs: Vec<B>) -> BufResult<usize, Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        if bufs.is_empty() {
+            return (Ok(0), bufs);
+        }
+        loop {
+            let slices: Vec<std::io::IoSlice<'_>> = bufs
+                .iter()
+                .map(|b| {
+                    let slice =
+                        unsafe { std::slice::from_raw_parts(b.stable_ptr(), b.bytes_init()) };
+                    std::io::IoSlice::new(slice)
+                })
+                .collect();
+            let res = {
+                use std::io::Write;
+                (&self.io.sock).write_vectored(&slices)
+            };
+            drop(slices);
+            match res {
+                Ok(n) => return (Ok(n), bufs),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.io.ready(true).await {
+                        return (Err(e), bufs);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (Err(e), bufs),
+            }
+        }
+    }
+
+    /// Write all initialized bytes from multiple buffers (`write_vectored`), looping until complete.
+    pub async fn write_all_vectored<B>(&self, bufs: Vec<B>) -> BufResult<(), Vec<B>>
+    where
+        B: IoBuf + Send + 'static,
+    {
+        let mut idx = 0usize;
+        let mut off = 0usize;
+        while idx < bufs.len() {
+            let init_len = bufs[idx].bytes_init();
+            if off >= init_len {
+                idx += 1;
+                off = 0;
+                continue;
+            }
+            let res = {
+                let slices: Vec<std::io::IoSlice<'_>> = bufs[idx..]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        let skip = if i == 0 { off } else { 0 };
+                        let len = b.bytes_init().saturating_sub(skip);
+                        let slice = if len == 0 {
+                            &[]
+                        } else {
+                            unsafe { std::slice::from_raw_parts(b.stable_ptr().add(skip), len) }
+                        };
+                        std::io::IoSlice::new(slice)
+                    })
+                    .collect();
+                use std::io::Write;
+                (&self.io.sock).write_vectored(&slices)
+            };
+            match res {
+                Ok(0) => {
+                    return (
+                        Err(io::Error::new(
+                            io::ErrorKind::WriteZero,
+                            "failed to write whole vectored buffer",
+                        )),
+                        bufs,
+                    );
+                }
+                Ok(mut n) => {
+                    while n > 0 && idx < bufs.len() {
+                        let rem = bufs[idx].bytes_init().saturating_sub(off);
+                        if n >= rem {
+                            n -= rem;
+                            idx += 1;
+                            off = 0;
+                        } else {
+                            off += n;
+                            n = 0;
+                        }
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(e) = self.io.ready(true).await {
+                        return (Err(e), bufs);
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (Err(e), bufs),
+            }
+        }
+        (Ok(()), bufs)
+    }
+
     /// Shut down the read half, write half, or both.
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.io.sock.shutdown(how)
@@ -382,3 +561,5 @@ impl TcpStream {
         raw(&self.io.sock)
     }
 }
+
+define_stream_split!(TcpStream);

@@ -198,13 +198,20 @@ macro_rules! child_reader {
             /// Read everything until the child closes its end, appending to `out`.
             pub async fn read_to_end(&self, out: &mut Vec<u8>) -> io::Result<usize> {
                 let mut total = 0;
+                let mut chunk = Vec::with_capacity(CHUNK);
                 loop {
-                    let (res, chunk) = self.read(Vec::with_capacity(CHUNK)).await;
+                    let (res, mut returned) = self.read(chunk).await;
                     match res? {
                         0 => return Ok(total),
                         n => {
-                            out.extend_from_slice(&chunk[..n]);
+                            out.extend_from_slice(&returned[..n]);
                             total += n;
+                            let cap = returned.capacity();
+                            returned.clear();
+                            if n * 10 >= cap * 9 && cap < (CHUNK * 16) {
+                                returned.reserve((cap * 2).min(CHUNK * 16));
+                            }
+                            chunk = returned;
                         }
                     }
                 }

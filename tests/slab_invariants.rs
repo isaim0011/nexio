@@ -11,7 +11,7 @@
 
 #![cfg(nexio_uring)]
 
-use nexio::reactor::slab::{CompletionSlab, OpState, PlaceholderBuf, SlabKey};
+use nexio::reactor::slab::{CompletionSlab, OpState, SlabKey};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -83,7 +83,7 @@ fn test_recycled_slot_stale_cqe_discarded() {
     // 1. Insert first op
     let key1 = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
     assert_eq!(key1.index(), 0);
     assert_eq!(key1.generation(), 0);
@@ -95,7 +95,7 @@ fn test_recycled_slot_stale_cqe_discarded() {
     // 2. Insert second op -> Slab reuses index 0 with bumped generation
     let key2 = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
     assert_eq!(key2.index(), 0);
     assert_eq!(
@@ -150,7 +150,7 @@ fn test_adversarial_out_of_bounds_cqes() {
     // Insert one valid op
     let valid_key = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
 
     // Feed out-of-bounds keys with valid op present
@@ -179,7 +179,7 @@ fn test_adversarial_generation_mismatch() {
 
     let key = slab.insert(OpState::Submitted {
         waker: None,
-        buf: Box::new(PlaceholderBuf),
+        buf: None,
     });
 
     let index = key.index() as u64;
@@ -236,7 +236,7 @@ fn test_adversarial_property_fuzz() {
                 let dc = Arc::new(AtomicUsize::new(0));
                 let key = slab.insert(OpState::Submitted {
                     waker: None,
-                    buf: Box::new(PlaceholderBuf),
+                    buf: None,
                 });
                 ops.push(ActiveOp {
                     key,

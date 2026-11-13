@@ -20,43 +20,61 @@ impl fmt::Display for Elapsed {
 
 impl std::error::Error for Elapsed {}
 
-/// Sleep for at least `duration` using `io_uring` `IORING_OP_TIMEOUT`.
+/// Sleep for at least `duration` using the reactor's userspace timer map.
 ///
-/// Dropping the returned future cancels the pending kernel timeout cleanly.
-#[cfg(nexio_uring)]
-pub async fn sleep(duration: Duration) {
+/// Dropping the returned [`Sleep`] future cancels the timer cleanly with zero kernel SQEs.
+pub fn sleep(duration: Duration) -> Sleep {
     if duration.is_zero() {
-        crate::executor::yield_now().await;
-        return;
+        return Sleep {
+            deadline: std::time::Instant::now(),
+            handle: None,
+            yield_once: true,
+        };
     }
-    if let Ok(op) = REACTOR.with(|r| r.borrow_mut().sleep(duration)) {
-        let _ = op.await;
-    }
+    sleep_until(std::time::Instant::now() + duration)
 }
 
-/// Sleep for at least `duration` using the reactor's timer map.
-///
-/// Dropping the returned future cancels the timer.
-#[cfg(nexio_poll)]
-pub async fn sleep(duration: Duration) {
-    if duration.is_zero() {
-        crate::executor::yield_now().await;
-        return;
-    }
+/// Sleep until `deadline` using the reactor's userspace timer map.
+pub fn sleep_until(deadline: std::time::Instant) -> Sleep {
     Sleep {
-        deadline: std::time::Instant::now() + duration,
+        deadline,
         handle: None,
+        yield_once: false,
     }
-    .await
 }
 
-#[cfg(nexio_poll)]
-struct Sleep {
+/// Future returned by [`sleep`] and [`sleep_until`].
+pub struct Sleep {
     deadline: std::time::Instant,
     handle: Option<(std::time::Instant, u64)>,
+    yield_once: bool,
 }
 
-#[cfg(nexio_poll)]
+impl Sleep {
+    /// Return the instant at which this `Sleep` is scheduled to complete.
+    pub fn deadline(&self) -> std::time::Instant {
+        self.deadline
+    }
+
+    /// Return `true` if the deadline has already elapsed.
+    pub fn is_elapsed(&self) -> bool {
+        std::time::Instant::now() >= self.deadline
+    }
+
+    /// Reset this `Sleep` to a new `deadline`, cancelling any previously registered timer.
+    pub fn reset(&mut self, deadline: std::time::Instant) {
+        if let Some(h) = self.handle.take() {
+            let _ = REACTOR.try_with(|r| {
+                if let Ok(mut r) = r.try_borrow_mut() {
+                    r.cancel_timer(h);
+                }
+            });
+        }
+        self.deadline = deadline;
+        self.yield_once = false;
+    }
+}
+
 impl Future for Sleep {
     type Output = ();
 
@@ -64,19 +82,24 @@ impl Future for Sleep {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
+        if self.yield_once {
+            self.yield_once = false;
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
         if std::time::Instant::now() >= self.deadline {
             return std::task::Poll::Ready(());
         }
-        let (deadline, waker) = (self.deadline, cx.waker().clone());
+        let deadline = self.deadline;
         let existing = self.handle;
         let handle = REACTOR.with(|r| {
             let mut r = r.borrow_mut();
             match existing {
                 Some(h) => {
-                    r.update_timer(h, waker);
+                    r.update_timer(h, cx.waker());
                     h
                 }
-                None => r.add_timer(deadline, waker),
+                None => r.add_timer(deadline, cx.waker().clone()),
             }
         });
         self.handle = Some(handle);
@@ -84,7 +107,6 @@ impl Future for Sleep {
     }
 }
 
-#[cfg(nexio_poll)]
 impl Drop for Sleep {
     fn drop(&mut self) {
         if let Some(h) = self.handle {
@@ -112,26 +134,108 @@ where
     }
 }
 
-/// A repeating timer that ticks at a fixed interval.
+/// Require a future to complete before `deadline`.
+pub async fn timeout_at<F>(deadline: std::time::Instant, future: F) -> Result<F::Output, Elapsed>
+where
+    F: Future,
+{
+    match select2(future, sleep_until(deadline)).await {
+        Either::Left(output) => Ok(output),
+        Either::Right(()) => Err(Elapsed),
+    }
+}
+
+/// Strategy used by [`Interval`] when ticks are missed due to slow processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissedTickBehavior {
+    /// Catch up immediately by firing missed ticks in a burst.
+    Burst,
+    /// Shift the schedule to `now + period`.
+    Delay,
+    /// Skip missed ticks and align to the next multiple of `period`.
+    #[default]
+    Skip,
+}
+
+/// A repeating timer that ticks at a fixed interval without cumulative drift.
 pub struct Interval {
     period: Duration,
+    next_tick: std::time::Instant,
+    missed_tick_behavior: MissedTickBehavior,
 }
 
 impl Interval {
     /// Wait until the next tick elapses.
     pub async fn tick(&mut self) {
-        sleep(self.period).await;
+        let now = std::time::Instant::now();
+        if self.next_tick > now {
+            sleep_until(self.next_tick).await;
+        } else {
+            crate::executor::yield_now().await;
+        }
+        let after = std::time::Instant::now();
+        match self.missed_tick_behavior {
+            MissedTickBehavior::Burst => {
+                self.next_tick += self.period;
+            }
+            MissedTickBehavior::Delay => {
+                self.next_tick = after + self.period;
+            }
+            MissedTickBehavior::Skip => {
+                self.next_tick += self.period;
+                if self.next_tick <= after {
+                    let missed = (after.duration_since(self.next_tick).as_nanos()
+                        / self.period.as_nanos().max(1)) as u32
+                        + 1;
+                    self.next_tick += self.period * missed;
+                }
+            }
+        }
+    }
+
+    /// Reset the interval so the next tick occurs `period` from now.
+    pub fn reset(&mut self) {
+        self.next_tick = std::time::Instant::now() + self.period;
     }
 
     /// Return the interval period.
     pub fn period(&self) -> Duration {
         self.period
     }
+
+    /// Set the [`MissedTickBehavior`] for this interval.
+    pub fn set_missed_tick_behavior(&mut self, behavior: MissedTickBehavior) {
+        self.missed_tick_behavior = behavior;
+    }
+
+    /// Return the current [`MissedTickBehavior`].
+    pub fn missed_tick_behavior(&self) -> MissedTickBehavior {
+        self.missed_tick_behavior
+    }
 }
 
 /// Create an [`Interval`] that yields every `period`.
 pub fn interval(period: Duration) -> Interval {
-    Interval { period }
+    let period = if period.is_zero() {
+        Duration::from_nanos(1)
+    } else {
+        period
+    };
+    interval_at(std::time::Instant::now() + period, period)
+}
+
+/// Create an [`Interval`] starting at `start` that yields every `period`.
+pub fn interval_at(start: std::time::Instant, period: Duration) -> Interval {
+    let period = if period.is_zero() {
+        Duration::from_nanos(1)
+    } else {
+        period
+    };
+    Interval {
+        period,
+        next_tick: start,
+        missed_tick_behavior: MissedTickBehavior::default(),
+    }
 }
 
 #[cfg(test)]

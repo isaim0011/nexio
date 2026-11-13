@@ -50,9 +50,7 @@ where
 {
     assert!(threads > 0, "run_sharded needs at least one thread");
     let factory = std::sync::Arc::new(factory);
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let cpus = crate::profile::HardwareProfile::get().cpus();
     let handles: Vec<_> = (0..threads)
         .map(|i| {
             let factory = std::sync::Arc::clone(&factory);
@@ -74,6 +72,20 @@ where
         .collect()
 }
 
+/// Run `factory(i)` on one shard per available CPU (respecting Linux cgroup
+/// quotas), returning every shard's result in shard order.
+///
+/// Equivalent to `run_sharded(HardwareProfile::get().recommended_shards(), factory)`.
+pub fn run_sharded_auto<F, Fut>(factory: F) -> Vec<Fut::Output>
+where
+    F: Fn(usize) -> Fut + Send + Sync + 'static,
+    Fut: Future + 'static,
+    Fut::Output: Send + 'static,
+{
+    let shards = crate::profile::HardwareProfile::get().recommended_shards();
+    run_sharded(shards, factory)
+}
+
 #[cfg(not(target_os = "linux"))]
 fn pin_to_cpu(_cpu: usize) {}
 
@@ -89,12 +101,19 @@ fn pin_to_cpu(cpu: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::run_sharded;
+    use super::{run_sharded, run_sharded_auto};
 
     #[test]
     fn runs_every_shard_and_returns_results_in_order() {
         let out = run_sharded(3, |i| async move { i * 10 });
         assert_eq!(out, vec![0, 10, 20]);
+    }
+
+    #[test]
+    fn auto_sharded_matches_recommended_shards() {
+        let expected = crate::profile::HardwareProfile::get().recommended_shards();
+        let out = run_sharded_auto(|i| async move { i });
+        assert_eq!(out, (0..expected).collect::<Vec<_>>());
     }
 
     #[test]

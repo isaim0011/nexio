@@ -92,6 +92,82 @@ unsafe impl IoBuf for Vec<u8> {
     }
 }
 
+// ── Additional standard buffer impls ──────────────────────────────────────────
+
+unsafe impl IoBuf for Box<[u8]> {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl IoBufMut for Box<[u8]> {
+    fn stable_ptr_mut(&mut self) -> *mut u8 {
+        self.as_mut_ptr()
+    }
+
+    fn bytes_total(&self) -> usize {
+        self.len()
+    }
+
+    unsafe fn set_init(&mut self, _n: usize) {}
+}
+
+unsafe impl<const N: usize> IoBuf for [u8; N] {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        N
+    }
+}
+
+unsafe impl<const N: usize> IoBufMut for [u8; N] {
+    fn stable_ptr_mut(&mut self) -> *mut u8 {
+        self.as_mut_ptr()
+    }
+
+    fn bytes_total(&self) -> usize {
+        N
+    }
+
+    unsafe fn set_init(&mut self, _n: usize) {}
+}
+
+unsafe impl IoBuf for String {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl IoBuf for &'static [u8] {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl IoBuf for &'static str {
+    fn stable_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.len()
+    }
+}
+
 // ── Slice — a fixed-capacity view into a Vec<u8> ─────────────────────────────
 
 /// A fixed-capacity buffer slice that participates in ownership transfer.
@@ -106,8 +182,16 @@ pub struct Slice<B> {
 
 impl<B: IoBufMut> Slice<B> {
     /// Wraps `buf`, exposing only the range `begin..end` to the kernel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `begin > end` or `end > buf.bytes_total()`.
     pub fn new(buf: B, begin: usize, end: usize) -> Self {
-        assert!(begin <= end);
+        assert!(
+            begin <= end && end <= buf.bytes_total(),
+            "Slice range {begin}..{end} out of bounds for buffer capacity {}",
+            buf.bytes_total()
+        );
         Self { buf, begin, end }
     }
 
@@ -160,6 +244,12 @@ unsafe impl<B: IoBufMut> IoBufMut for Slice<B> {
     }
 
     unsafe fn set_init(&mut self, n: usize) {
+        assert!(
+            self.begin + n <= self.end,
+            "Slice::set_init({n}) exceeds slice end {} (begin={})",
+            self.end,
+            self.begin
+        );
         unsafe { self.buf.set_init(self.begin + n) }
     }
 }
@@ -196,3 +286,42 @@ pub trait IoBufMutExt: IoBufMut + Sized {
 }
 
 impl<B: IoBufMut> IoBufMutExt for B {}
+
+/// A read-only slice view into any [`IoBuf`] for partial-write loops.
+pub struct IoSlice<B> {
+    buf: B,
+    begin: usize,
+    end: usize,
+}
+
+impl<B: IoBuf> IoSlice<B> {
+    /// Wraps `buf`, exposing initialized bytes in `begin..end`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `begin > end` or `end > buf.bytes_init()`.
+    pub fn new(buf: B, begin: usize, end: usize) -> Self {
+        assert!(
+            begin <= end && end <= buf.bytes_init(),
+            "IoSlice range {begin}..{end} out of bounds for initialized length {}",
+            buf.bytes_init()
+        );
+        Self { buf, begin, end }
+    }
+
+    /// Recovers the underlying buffer after the operation completes.
+    pub fn into_inner(self) -> B {
+        self.buf
+    }
+}
+
+unsafe impl<B: IoBuf> IoBuf for IoSlice<B> {
+    fn stable_ptr(&self) -> *const u8 {
+        // SAFETY: `begin <= end <= self.buf.bytes_init()` checked in `IoSlice::new`.
+        unsafe { self.buf.stable_ptr().add(self.begin) }
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.end - self.begin
+    }
+}

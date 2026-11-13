@@ -3,7 +3,7 @@
 //! nexio contains no HTTP parser of its own: hyper does the protocol work, and this
 //! module connects it to nexio's sockets (through [`Compat`]),
 //! so requests and responses are the standard `http` types. Any [`Duplex`] stream
-//! works: a plain [`TcpStream`](crate::net::TcpStream), or a
+//! works: a plain [`TcpStream`], or a
 //! [`TlsStream`](crate::tls::TlsStream) for HTTPS (with the `tls` feature).
 //!
 //! ```ignore
@@ -23,23 +23,38 @@
 //! Only HTTP/1.1 is provided. Futures here are not `Send`, like everything in nexio, which
 //! rules out hyper's HTTP/2 (it requires `Send` tasks).
 
-use std::error::Error as StdError;
+use std::{error::Error as StdError, future::Future, io, net::SocketAddr};
 
 pub use http_body_util;
 pub use hyper;
 use hyper::{
     body::{Body, Incoming},
     client::conn::http1::SendRequest,
-    server::conn::http1,
+    server::conn::{http1, http2},
     Request, Response,
 };
 
 use crate::{
+    addr::ToAddrs,
     compat::{Compat, Duplex},
-    spawn,
+    executor::Either,
+    net::{TcpListener, TcpStream},
+    select2, spawn,
 };
 
 type BoxError = Box<dyn StdError + Send + Sync>;
+
+#[derive(Clone, Copy)]
+struct LocalExec;
+
+impl<F> hyper::rt::Executor<F> for LocalExec
+where
+    F: Future + 'static,
+{
+    fn execute(&self, fut: F) {
+        drop(spawn(fut));
+    }
+}
 
 /// Serve HTTP/1.1 requests arriving on `io` until the connection ends, answering each
 /// with `service` (for example one made with `hyper::service::service_fn`).
@@ -57,6 +72,98 @@ where
     http1::Builder::new()
         .serve_connection(Compat::new(io), service)
         .await
+}
+
+/// Serve HTTP/2 requests arriving on `io` until the connection ends.
+pub async fn serve_http2_connection<S, Svc, B>(io: S, service: Svc) -> hyper::Result<()>
+where
+    S: Duplex,
+    Svc: hyper::service::Service<Request<Incoming>, Response = Response<B>>,
+    Svc::Error: Into<BoxError>,
+    Svc::Future: 'static,
+    B: Body + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
+{
+    http2::Builder::new(LocalExec)
+        .serve_connection(Compat::new(io), service)
+        .await
+}
+
+/// High-level HTTP/1.1 server bound to a [`TcpListener`].
+pub struct Server {
+    listener: TcpListener,
+}
+
+impl Server {
+    /// Bind an HTTP server to `addr`.
+    pub async fn bind(addr: impl ToAddrs) -> io::Result<Self> {
+        let listener = TcpListener::bind(addr).await?;
+        Ok(Self { listener })
+    }
+
+    /// Wrap an existing [`TcpListener`].
+    pub fn from_listener(listener: TcpListener) -> Self {
+        Self { listener }
+    }
+
+    /// Return the local bound address.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// Accept connections and serve each with a service returned by `make_service`.
+    pub async fn serve<M, Svc, B>(self, mut make_service: M) -> io::Result<()>
+    where
+        M: FnMut(&TcpStream) -> Svc,
+        Svc: hyper::service::Service<Request<Incoming>, Response = Response<B>> + 'static,
+        Svc::Error: Into<BoxError>,
+        Svc::Future: 'static,
+        B: Body + 'static,
+        B::Error: Into<BoxError>,
+    {
+        loop {
+            let stream = self.listener.accept().await?;
+            let _ = stream.set_nodelay(true);
+            let svc = make_service(&stream);
+            drop(spawn(async move {
+                let _ = serve_connection(stream, svc).await;
+            }));
+        }
+    }
+
+    /// Accept connections until `shutdown` resolves, then stop accepting.
+    pub async fn serve_with_shutdown<M, Svc, B, Sh>(
+        self,
+        mut make_service: M,
+        shutdown: Sh,
+    ) -> io::Result<()>
+    where
+        M: FnMut(&TcpStream) -> Svc,
+        Svc: hyper::service::Service<Request<Incoming>, Response = Response<B>> + 'static,
+        Svc::Error: Into<BoxError>,
+        Svc::Future: 'static,
+        B: Body + 'static,
+        B::Error: Into<BoxError>,
+        Sh: Future<Output = ()>,
+    {
+        let accept_loop = async {
+            loop {
+                let stream = self.listener.accept().await?;
+                let _ = stream.set_nodelay(true);
+                let svc = make_service(&stream);
+                drop(spawn(async move {
+                    let _ = serve_connection(stream, svc).await;
+                }));
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), io::Error>(())
+        };
+        match select2(accept_loop, shutdown).await {
+            Either::Left(res) => res,
+            Either::Right(()) => Ok(()),
+        }
+    }
 }
 
 /// An HTTP/1.1 client connection. Requests are sent one at a time, in order.

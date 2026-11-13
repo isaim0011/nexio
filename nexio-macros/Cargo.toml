@@ -1,0 +1,16 @@
+[package]
+name = "nexio-macros"
+version = "0.2.5"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/isaim0011/nexio"
+description = "Procedural macros (#[nexio::main] and #[nexio::test]) for the nexio async runtime"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

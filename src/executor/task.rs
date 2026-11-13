@@ -67,6 +67,31 @@ pub(crate) enum TaskState<T> {
 
 pub(crate) struct TaskShared<T> {
     pub(crate) state: RefCell<TaskState<T>>,
+    pub(crate) is_cancelled: std::cell::Cell<bool>,
+}
+
+pub(crate) trait TaskControl {
+    fn is_cancelled(&self) -> bool;
+    fn mark_panicked(&self);
+}
+
+impl<T> TaskControl for TaskShared<T> {
+    #[inline]
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled.get()
+    }
+
+    fn mark_panicked(&self) {
+        let mut state = self.state.borrow_mut();
+        if let TaskState::Running { join_waker } = &mut *state {
+            let waker = join_waker.take();
+            *state = TaskState::Panicked;
+            drop(state);
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }
+    }
 }
 
 /// An owned permission to join on a spawned task.
@@ -77,7 +102,6 @@ pub(crate) struct TaskShared<T> {
 pub struct JoinHandle<T> {
     pub(crate) task_id: TaskId,
     pub(crate) shared: Rc<TaskShared<T>>,
-    pub(crate) is_cancelled: Rc<std::cell::Cell<bool>>,
 }
 
 impl<T> JoinHandle<T> {
@@ -101,7 +125,7 @@ impl<T> JoinHandle<T> {
 
     /// Aborts the task. Alias for [`cancel`](Self::cancel).
     pub fn abort(&self) {
-        self.is_cancelled.set(true);
+        self.shared.is_cancelled.set(true);
         let mut state = self.shared.state.borrow_mut();
         if let TaskState::Running { join_waker } = &mut *state {
             let w = join_waker.take();
@@ -145,26 +169,28 @@ pub(crate) struct Task {
     #[allow(dead_code)]
     pub(crate) id: TaskId,
     pub(crate) waker: Waker,
-    pub(crate) is_cancelled: Rc<std::cell::Cell<bool>>,
+    control: Rc<dyn TaskControl>,
     future: Pin<Box<dyn Future<Output = ()> + 'static>>,
-    on_panic: Option<Box<dyn FnOnce()>>,
 }
 
 impl Task {
     pub(crate) fn new(
         id: TaskId,
         waker: Waker,
-        is_cancelled: Rc<std::cell::Cell<bool>>,
+        control: Rc<dyn TaskControl>,
         future: Pin<Box<dyn Future<Output = ()> + 'static>>,
-        on_panic: Box<dyn FnOnce()>,
     ) -> Self {
         Self {
             id,
             waker,
-            is_cancelled,
+            control,
             future,
-            on_panic: Some(on_panic),
         }
+    }
+
+    #[inline]
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.control.is_cancelled()
     }
 
     /// Poll the task using its own stored waker without cloning the `Waker`.
@@ -176,9 +202,7 @@ impl Task {
         match res {
             Ok(poll) => poll,
             Err(_panic_payload) => {
-                if let Some(on_panic) = self.on_panic.take() {
-                    on_panic();
-                }
+                self.control.mark_panicked();
                 Poll::Ready(())
             }
         }
