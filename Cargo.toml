@@ -1,12 +1,12 @@
 [package]
 name = "nexio"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["isaim0011"]
 rust-version = "1.75"
 description = "A thread-per-core async runtime with owned-buffer I/O: io_uring on Linux (cancellation layer checked by Miri and Kani), a portable epoll/kqueue/IOCP backend elsewhere"
 readme = "README.md"
-keywords = ["io-uring", "async", "runtime", "linux", "network"]
+keywords = ["io-uring", "async", "runtime", "tls", "http"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
 exclude = ["reports/", "research_notes/", "bench/", "benches/", "scripts/", "utcp/", "fuzz/", ".github/", "ROADMAP.md"]
 license = "MIT OR Apache-2.0"

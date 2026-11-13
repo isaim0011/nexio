@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 - 2026-11-13
+
+Documentation only: new README, CONTRIBUTING and SECURITY files, updated crates.io keywords.
+
 ## 0.2.0 - 2026-11-13
 
 ### Added
