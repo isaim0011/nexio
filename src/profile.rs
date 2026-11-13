@@ -295,8 +295,13 @@ fn probe_total_ram() -> Option<u64> {
     None
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
+type RlimitResource = libc::c_int;
+
 #[cfg(unix)]
-fn probe_rlimit(resource: libc::__rlimit_resource_t) -> Option<u64> {
+fn probe_rlimit(resource: RlimitResource) -> Option<u64> {
     let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
     // SAFETY: `rlim` is a valid out-pointer to `libc::rlimit`.
     let ret = unsafe { libc::getrlimit(resource, &mut rlim) };

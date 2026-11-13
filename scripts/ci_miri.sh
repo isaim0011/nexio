@@ -24,10 +24,11 @@ cargo +nightly miri --version
 
 echo ""
 echo "=== [2/4] Setting Miri configuration flags ==="
-# Use a dedicated TMPDIR to avoid workspace conflicts with /tmp
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mkdir -p "${SCRIPT_DIR}/target/tmp"
-export TMPDIR="${SCRIPT_DIR}/target/tmp"
+# Use a dedicated TMPDIR outside the workspace so Cargo does not treat Miri's
+# temporary sysroot crate as belonging to the root workspace.
+MIRI_TMP="${RUNNER_TEMP:-/tmp}/nexio-miri-tmp"
+mkdir -p "${MIRI_TMP}"
+export TMPDIR="${MIRI_TMP}"
 
 # Flags:
 # -Zmiri-strict-provenance: catches int-to-pointer casting and pointer provenance violations

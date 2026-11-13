@@ -141,7 +141,7 @@ fuzz_target!(|data: &[u8]| {
                 } else {
                     (Box::new(PlaceholderBuf), Some(Tracker(drops.clone())))
                 };
-                let key = slab.insert(OpState::Submitted { waker: None, buf });
+                let key = slab.insert(OpState::Submitted { waker: None, buf: Some(buf) });
                 ops.push(Op {
                     key,
                     st: St::Submitted,

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6 - 2026-11-14
+
+### Fixed
+- **macOS / non-glibc Unix builds (`src/profile.rs`):** Fixed `probe_rlimit` resource type for macOS (`kqueue`) and non-glibc Unix targets (`libc::c_int` vs `libc::__rlimit_resource_t`).
+- **Fuzz & Miri CI:** Updated `fuzz/fuzz_targets/slab_ops.rs` for `Option<Box<dyn ErasedBuf>>` and moved Miri's `TMPDIR` outside the workspace root.
+
 ## 0.2.5 - 2026-11-14
 
 ### Added
