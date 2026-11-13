@@ -33,8 +33,9 @@ nexio is built around three ideas:
 - **One reactor per thread, no work-stealing.** Tasks are `!Send`, there are no locks on the hot path, and
   you scale across cores by running one independent reactor per core.
 
-It ships with the pieces a real service needs, on every platform: TCP, UDP, Unix sockets, files, timers,
-channels, signals, child processes, async DNS, and (behind features) TLS and HTTP/1.1.
+It ships with the pieces a real service needs, on every platform: TCP (including `into_split` and vectored I/O),
+UDP, Unix sockets, async filesystem operations, timers, async synchronization primitives, signals, child
+processes, async DNS, and (behind features) TLS and HTTP/1.1 + HTTP/2.
 
 ## Quick start
 
@@ -48,38 +49,39 @@ An echo server:
 ```rust
 use nexio::net::TcpListener;
 
-fn main() -> std::io::Result<()> {
-    nexio::block_on(async {
-        let listener = TcpListener::bind(("127.0.0.1", 7878)).await?;
-        loop {
-            let stream = listener.accept().await?;
-            drop(nexio::spawn(async move {
-                let mut buf = Vec::with_capacity(4096);
-                loop {
-                    let (res, b) = stream.read(buf).await;   // the buffer goes in and comes back
-                    buf = b;
-                    match res {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let (res, b) = stream.write_all(buf).await;
-                            buf = b;
-                            if res.is_err() { break; }
-                        }
+#[nexio::main]
+async fn main() -> std::io::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 7878)).await?;
+    loop {
+        let stream = listener.accept().await?;
+        drop(nexio::spawn(async move {
+            let mut buf = Vec::with_capacity(4096);
+            loop {
+                let (res, b) = stream.read(buf).await;   // the buffer goes in and comes back
+                buf = b;
+                match res {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let (res, b) = stream.write_all(buf).await;
+                        buf = b;
+                        if res.is_err() { break; }
                     }
                 }
-            }));
-        }
-    })
+            }
+        }));
+    }
 }
 ```
 
 ### Use every core
 
 ```rust
-nexio::run_sharded(std::thread::available_parallelism()?.get(), |_shard| async move {
-    let listener = nexio::net::TcpListener::bind(("0.0.0.0", 7878)).await.unwrap();
+#[nexio::main(shards = "auto")]
+async fn main() -> std::io::Result<()> {
+    let listener = nexio::net::TcpListener::bind(("0.0.0.0", 7878)).await?;
     // ... the same accept loop
-});
+    Ok(())
+}
 ```
 
 Each shard owns its ring and executor, pinned to its own CPU. `TcpListener::bind` sets `SO_REUSEPORT`, so the
@@ -92,18 +94,17 @@ nexio = { version = "0.2", features = ["http", "tls"] }
 ```
 
 ```rust
-use nexio::http;
+use nexio::http::Server;
 use hyper::{service::service_fn, Response, body::Bytes};
 use http_body_util::Full;
 
-// One task per connection; works over a TcpStream or a TlsStream.
-let stream = listener.accept().await?;
-drop(nexio::spawn(async move {
-    let _ = http::serve_connection(stream, service_fn(|_req| async {
-        Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from("hello"))))
-    })).await;
-}));
+Server::bind(("127.0.0.1", 8080)).await?.serve(|_req| async {
+    Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from("hello"))))
+}).await?;
 ```
+
+Low-level helpers `http::serve_connection` (HTTP/1.1) and `http::serve_http2_connection` (HTTP/2 with `LocalExec`)
+work over any `TcpStream` or `TlsStream`.
 
 More in [`examples/`](examples): `echo_server`, `echo_server_multicore`, `file_and_timeout`, `soak`.
 
@@ -111,13 +112,14 @@ More in [`examples/`](examples): `echo_server`, `echo_server_multicore`, `file_a
 
 | Area | What you get |
 |:---|:---|
-| **Networking** | `TcpListener`/`TcpStream`, `UdpSocket`, Unix-domain stream and datagram sockets, async host-name resolution |
-| **Files** | positional `read_at`/`write_at`, `OpenOptions` |
-| **Runtime** | `block_on`, `spawn`, `JoinSet`, `join2`, `select2`, timers and timeouts, bounded and unbounded channels, `spawn_blocking` |
+| **Macros** (`macros`, default) | `#[nexio::main]` (with optional `shards = N` or `shards = "auto"`), `#[nexio::test]` |
+| **Networking** | `TcpListener`/`TcpStream` (`split`/`into_split`/`reunite`, vectored I/O, multishot accept/recv & `ProvidedBufRing` on `io_uring`), `UdpSocket`, Unix-domain stream (`into_split`) and datagram sockets, async DNS |
+| **Files** (`nexio::fs`) | positional `read_at`/`write_at`/`read_vectored_at`/`write_vectored_at`, `OpenOptions`, `metadata`/`set_len`/`set_permissions`, plus `read`, `write`, `copy`, `rename`, `remove_file`, `create_dir_all`, `read_dir`, etc. |
+| **Runtime & Sync** (`nexio::sync`, `nexio::time`) | `block_on`, `spawn`, `JoinSet`, `join2`, `select2`, `Sleep` (`reset`/`deadline`), `Interval` (`MissedTickBehavior`), `Notify`, `Semaphore`, `Mutex`, `RwLock`, `watch`, `broadcast`, `CancellationToken`, `oneshot`, `mpsc`, `spawn_blocking`, `ReactorStats` |
 | **Processes and signals** | spawn children with piped stdio, `ctrl_c`, Unix `signal()` |
 | **TLS** (`tls`) | `rustls` client and server; a connection cut without `close_notify` is an `UnexpectedEof` error, never a clean end; ALPN |
-| **HTTP/1.1** (`http`) | client and server on `hyper`, plain or over TLS |
-| **Ecosystem** (`tokio-compat`) | `nexio::compat::Compat` exposes nexio streams as tokio `AsyncRead`/`AsyncWrite` (no tokio runtime needed) |
+| **HTTP/1.1 & HTTP/2** (`http`) | `Server::bind` builder, HTTP/1.1 and HTTP/2 client & server on `hyper` (`LocalExec`), plain or over TLS |
+| **Ecosystem** (`tokio-compat`) | `nexio::compat::Compat` exposes nexio streams (and split halves) as tokio `AsyncRead`/`AsyncWrite` (no tokio runtime needed) |
 
 nexio contains no cryptography and no HTTP parser of its own: TLS is `rustls`, HTTP is `hyper`, wired to nexio's
 sockets.
@@ -126,20 +128,22 @@ sockets.
 
 | Feature | Effect |
 |:---|:---|
+| `macros` *(default)* | `#[nexio::main]` and `#[nexio::test]` procedural macros via `nexio-macros` |
 | `tls` | `nexio::tls` over `rustls` (ring provider; you choose the trust roots) |
-| `http` | `nexio::http` over `hyper` (HTTP/1.1) |
+| `http` | `nexio::http` over `hyper` (HTTP/1.1, HTTP/2, and `Server`) |
 | `tokio-compat` | the tokio `AsyncRead`/`AsyncWrite` adapter |
 | `poll` | force the portable backend on Linux (useful where `io_uring` is blocked) |
-| `no-coop-taskrun` | do not request `COOP_TASKRUN`/`DEFER_TASKRUN` on `io_uring` |
+| `runtime-fallback` | on Linux, probe `io_uring_available()` at runtime and automatically fall back to `epoll` when `io_uring_setup` is blocked (`EPERM`/`ENOSYS`/`EACCES`) |
+| `coop-taskrun` | opt in to `IORING_SETUP_COOP_TASKRUN` / `DEFER_TASKRUN` on `io_uring` |
 
 ## Platforms
 
-The backend is chosen at build time; the public API is the same, and the shared API tests run unchanged against
-every backend.
+The backend is chosen at build time (or at runtime on Linux with `--features runtime-fallback`); the public API is
+the same, and the shared API tests run unchanged against every backend.
 
 | | `io_uring` backend | Portable backend |
 |:---|:---|:---|
-| **Used on** | Linux (default) | Windows, macOS, other Unix, and Linux with `--features poll` |
+| **Used on** | Linux (default) | Windows, macOS, other Unix, and Linux with `--features poll` or `runtime-fallback` |
 | **Mechanism** | completion-based `io_uring`; the kernel holds your buffer | readiness polling (epoll / kqueue / IOCP) over non-blocking sockets |
 | TCP, UDP, timers, channels, `spawn` | yes | yes |
 | Files | native `io_uring` | blocking thread pool |
@@ -148,9 +152,10 @@ every backend.
 | TLS, HTTP/1.1, tokio compat | yes | yes |
 | **Verification** | Miri, Kani, fuzzing, soak, kernel matrix, CI | CI on Windows, macOS and Linux epoll |
 
-**Requirements.** On Linux, a kernel with `io_uring` (tested on vendor kernels 5.10, 5.15, 6.1 and 6.12; newer
-features such as `DEFER_TASKRUN` are used when present). Some container runtimes block `io_uring` with
-seccomp; use `--features poll` there. Rust 1.75 or newer is declared; it is built and tested on current stable.
+**Requirements.** On Linux, a kernel with `io_uring` (tested on vendor kernels 5.10, 5.15, 6.1 and 6.12). Some
+container runtimes block `io_uring` with seccomp; enable `--features runtime-fallback` for automatic runtime
+fallback to `epoll`, or `--features poll` to compile without `io_uring`. Rust 1.75 or newer is declared; it is
+built and tested on current stable.
 
 ## Performance, honestly
 
@@ -193,8 +198,8 @@ not had the soak, fuzz and kernel-matrix campaigns the `io_uring` backend has ha
 
 ## Not included
 
-HTTP/2 (hyper's HTTP/2 needs `Send` tasks; nexio's are thread-local by design), HTTP/3, WebSockets, and a default
-TLS trust store (choose roots yourself, for example with `webpki-roots`). See [ROADMAP.md](ROADMAP.md).
+HTTP/3, WebSockets, and a default TLS trust store (choose roots yourself, for example with `webpki-roots`). See
+[ROADMAP.md](ROADMAP.md).
 
 ## Building and testing
 
