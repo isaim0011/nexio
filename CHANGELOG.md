@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 - 2026-11-13
 
 ### Fixed
 - **Wakers called from another thread were lost.** A nexio task's `Waker` only worked on the thread
