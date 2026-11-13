@@ -260,6 +260,7 @@ unsafe impl IoBufMut for RawTail {
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
     inner: std::fs::OpenOptions,
+    noatime: bool,
 }
 
 impl Default for OpenOptions {
@@ -273,6 +274,7 @@ impl OpenOptions {
     pub fn new() -> Self {
         Self {
             inner: std::fs::OpenOptions::new(),
+            noatime: false,
         }
     }
 
@@ -320,13 +322,34 @@ impl OpenOptions {
         self
     }
 
+    /// Do not update the file's access time on reads (`O_NOATIME`, Linux only; ignored
+    /// elsewhere). Falls back to a normal open when the kernel refuses it (not the owner).
+    pub fn noatime(&mut self, noatime: bool) -> &mut Self {
+        self.noatime = noatime;
+        self
+    }
+
     /// Open the file at `path` with these options.
     pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
         let opts = self.inner.clone();
+        #[cfg(target_os = "linux")]
+        let noatime = self.noatime;
         let path: PathBuf = path.as_ref().to_path_buf();
-        let file = spawn_blocking(move || opts.open(path))
-            .await
-            .map_err(join_err)??;
+        let file = spawn_blocking(move || {
+            #[cfg(target_os = "linux")]
+            if noatime {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut with = opts.clone();
+                with.custom_flags(libc::O_NOATIME);
+                match with.open(&path) {
+                    Err(e) if e.raw_os_error() == Some(libc::EPERM) => {}
+                    other => return other,
+                }
+            }
+            opts.open(path)
+        })
+        .await
+        .map_err(join_err)??;
         Ok(File::from_std(file))
     }
 }

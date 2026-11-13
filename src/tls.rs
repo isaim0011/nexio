@@ -62,6 +62,9 @@ pub struct TlsStream<S: Duplex> {
     conn: RefCell<Connection>,
     /// The transport reported end-of-stream.
     eof: Cell<bool>,
+    /// Buffers kept between calls so steady-state reads and writes do not allocate.
+    out_spare: Cell<Vec<u8>>,
+    read_spare: Cell<Vec<u8>>,
 }
 
 impl<S: Duplex> TlsStream<S> {
@@ -70,23 +73,29 @@ impl<S: Duplex> TlsStream<S> {
             io: Rc::new(io),
             conn: RefCell::new(conn),
             eof: Cell::new(false),
+            out_spare: Cell::new(Vec::new()),
+            read_spare: Cell::new(Vec::new()),
         }
     }
 
     /// Write out everything rustls has queued for the peer.
     async fn flush_tls(&self) -> io::Result<()> {
         loop {
-            let mut out = Vec::new();
+            let mut out = self.out_spare.take();
+            out.clear();
             {
                 let mut c = self.conn.borrow_mut();
                 if !c.wants_write() {
+                    self.out_spare.set(out);
                     return Ok(());
                 }
                 while c.wants_write() {
                     c.write_tls(&mut out)?;
                 }
             }
-            let (res, _) = self.io.clone().write_all_owned(out).await;
+            let (res, mut out) = self.io.clone().write_all_owned(out).await;
+            out.clear();
+            self.out_spare.set(out);
             res?;
         }
     }
@@ -162,7 +171,9 @@ impl<S: Duplex> TlsStream<S> {
         if total == 0 {
             return (Ok(0), buf);
         }
-        let mut tmp = vec![0u8; total.min(READ_CHUNK)];
+        let want = total.min(READ_CHUNK);
+        let mut tmp = self.read_spare.take();
+        tmp.resize(want, 0);
         loop {
             let r = self.conn.borrow_mut().reader().read(&mut tmp);
             match r {
@@ -173,6 +184,7 @@ impl<S: Duplex> TlsStream<S> {
                         std::ptr::copy_nonoverlapping(tmp.as_ptr(), buf.stable_ptr_mut(), n);
                         buf.set_init(n);
                     }
+                    self.read_spare.set(tmp);
                     return (Ok(n), buf);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {

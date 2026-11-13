@@ -200,7 +200,7 @@ pub mod mpsc {
         queue: VecDeque<T>,
         capacity: usize,
         receiver_waker: Option<Waker>,
-        sender_wakers: VecDeque<(u64, Waker)>,
+        sender_wakers: std::collections::BTreeMap<u64, Waker>,
         next_waiter_id: u64,
         sender_count: usize,
         receiver_count: usize,
@@ -378,16 +378,17 @@ pub mod mpsc {
                 }
             };
 
-            if let Some(entry) = state
-                .sender_wakers
-                .iter_mut()
-                .find(|(id, _)| *id == waiter_id)
-            {
-                entry.1 = cx.waker().clone();
-            } else {
-                state
-                    .sender_wakers
-                    .push_back((waiter_id, cx.waker().clone()));
+            // Waiter ids only grow, so the map's order is arrival order (FIFO), and lookup,
+            // update and removal are O(log n) instead of a scan of every blocked sender.
+            match state.sender_wakers.get_mut(&waiter_id) {
+                Some(w) => {
+                    if !w.will_wake(cx.waker()) {
+                        *w = cx.waker().clone();
+                    }
+                }
+                None => {
+                    state.sender_wakers.insert(waiter_id, cx.waker().clone());
+                }
             }
 
             Poll::Pending
@@ -398,9 +399,7 @@ pub mod mpsc {
         fn drop(&mut self) {
             if let Some(id) = self.waiter_id {
                 let mut state = self.sender.state.borrow_mut();
-                if let Some(pos) = state.sender_wakers.iter().position(|(w_id, _)| *w_id == id) {
-                    state.sender_wakers.remove(pos);
-                }
+                state.sender_wakers.remove(&id);
             }
         }
     }
@@ -447,7 +446,7 @@ pub mod mpsc {
         pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
             let mut state = self.state.borrow_mut();
             if let Some(val) = state.queue.pop_front() {
-                if let Some((_id, waker)) = state.sender_wakers.pop_front() {
+                if let Some((_id, waker)) = state.sender_wakers.pop_first() {
                     waker.wake();
                 }
                 Poll::Ready(Some(val))
@@ -463,7 +462,7 @@ pub mod mpsc {
         pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
             let mut state = self.state.borrow_mut();
             if let Some(val) = state.queue.pop_front() {
-                if let Some((_id, waker)) = state.sender_wakers.pop_front() {
+                if let Some((_id, waker)) = state.sender_wakers.pop_first() {
                     waker.wake();
                 }
                 Ok(val)
@@ -480,7 +479,7 @@ pub mod mpsc {
             state.receiver_count = 0;
             state.receiver_waker = None;
             state.queue.clear();
-            while let Some((_id, waker)) = state.sender_wakers.pop_front() {
+            while let Some((_id, waker)) = state.sender_wakers.pop_first() {
                 waker.wake();
             }
         }
@@ -492,7 +491,7 @@ pub mod mpsc {
             state.receiver_count = 0;
             state.receiver_waker = None;
             state.queue.clear();
-            while let Some((_id, waker)) = state.sender_wakers.pop_front() {
+            while let Some((_id, waker)) = state.sender_wakers.pop_first() {
                 waker.wake();
             }
         }
@@ -508,7 +507,7 @@ pub mod mpsc {
             queue: VecDeque::with_capacity(buffer),
             capacity: buffer,
             receiver_waker: None,
-            sender_wakers: VecDeque::new(),
+            sender_wakers: std::collections::BTreeMap::new(),
             next_waiter_id: 0,
             sender_count: 1,
             receiver_count: 1,
@@ -662,7 +661,7 @@ pub mod mpsc {
             queue: VecDeque::new(),
             capacity: usize::MAX,
             receiver_waker: None,
-            sender_wakers: VecDeque::new(),
+            sender_wakers: std::collections::BTreeMap::new(),
             next_waiter_id: 0,
             sender_count: 1,
             receiver_count: 1,

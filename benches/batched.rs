@@ -58,7 +58,15 @@ fn main() {
     let t0 = Instant::now();
     match backend.as_str() {
         "nexio" => nexio::block_on(async {
-            let file = Rc::new(nexio::fs::File::open(&path).await.unwrap());
+            let noatime = std::env::var_os("NEXIO_NOATIME").is_some();
+            let file = Rc::new(
+                nexio::fs::OpenOptions::new()
+                    .read(true)
+                    .noatime(noatime)
+                    .open(&path)
+                    .await
+                    .unwrap(),
+            );
             let mut hs = Vec::with_capacity(qd);
             for w in 0..qd {
                 let f = Rc::clone(&file);

@@ -93,6 +93,10 @@ name = "zc"
 harness = false
 
 [[bench]]
+name = "tasks"
+harness = false
+
+[[bench]]
 name = "fanout"
 harness = false
 

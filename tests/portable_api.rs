@@ -547,3 +547,23 @@ fn connected_udp_recv_waits_for_a_datagram_that_arrives_later() {
         sender.await.unwrap();
     });
 }
+
+#[test]
+fn noatime_open_reads_back_the_same_bytes() {
+    // O_NOATIME is honored on Linux when permitted and silently dropped elsewhere; either way the
+    // file must open and read normally.
+    let path = std::env::temp_dir().join(format!("nexio_noatime_{}.bin", std::process::id()));
+    std::fs::write(&path, b"abcdef").unwrap();
+    block_on(async {
+        let f = nexio::fs::OpenOptions::new()
+            .read(true)
+            .noatime(true)
+            .open(&path)
+            .await
+            .unwrap();
+        let (res, buf) = f.read_at(vec![0u8; 6], 0).await;
+        assert_eq!(res.unwrap(), 6);
+        assert_eq!(buf, b"abcdef");
+    });
+    let _ = std::fs::remove_file(&path);
+}

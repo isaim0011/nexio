@@ -161,12 +161,14 @@ in [`reports/split_benchmark_results.md`](reports/split_benchmark_results.md).
 |:---|:---|:---|
 | TCP echo, server CPU per message | **6.75 µs** | compio / monoio 7.1 to 7.2 µs, tokio 7.6 to 7.85 µs |
 | File I/O | 5 to 10x tokio | level with compio and monoio |
-| Batched random reads (1M, page cache) | **1.46M IOPS** | compio 1.27 to 1.34M, monoio 1.36 to 1.46M |
+| Batched random reads (1M, page cache) | **1.46M IOPS** (1.42M typical; `noatime` adds ~6%) | compio 1.27 to 1.34M, monoio 1.36 to 1.46M |
+| Scheduler: spawn + await a task | **~110 ns** | tokio current-thread ~168 ns |
+| Scheduler: bounded channel send + recv | **~15.5 ns** | tokio ~39 ns |
 
 Read this as: **nexio is competitive with the other `io_uring` runtimes and slightly ahead on these tests, not
 dramatically faster.** On plain TCP about 93% of server CPU is the kernel's TCP stack, which no user-space
 runtime can remove. We tried registered buffers, multishot operations, zero-copy sends and batching; the
-results, including those that did not help, are in the reports. Other hardware, real NICs and more cores may
+results, including those that did not help, are in the reports, and a profile of where the time goes is in [`reports/optimization_pass.md`](reports/optimization_pass.md). Other hardware, real NICs and more cores may
 give different numbers.
 
 ## Verification

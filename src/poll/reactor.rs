@@ -41,6 +41,9 @@ pub struct Reactor {
     poller: Arc<Poller>,
     mailbox: Arc<crate::blocking::Mailbox>,
     events: Events,
+    /// Reused between waits so a busy reactor does not allocate per wakeup round.
+    wake_scratch: Vec<Waker>,
+    rearm_scratch: Vec<usize>,
     sources: Slab<Source>,
     timers: BTreeMap<TimerHandle, Waker>,
     next_timer: u64,
@@ -64,6 +67,8 @@ impl Reactor {
             poller,
             mailbox,
             events: Events::new(),
+            wake_scratch: Vec::new(),
+            rearm_scratch: Vec::new(),
             sources: Slab::new(),
             timers: BTreeMap::new(),
             next_timer: 0,
@@ -111,10 +116,9 @@ impl Reactor {
                 "socket is deregistered",
             ));
         };
-        if write {
-            src.write = Some(waker.clone());
-        } else {
-            src.read = Some(waker.clone());
+        let slot = if write { &mut src.write } else { &mut src.read };
+        if !matches!(slot, Some(existing) if existing.will_wake(waker)) {
+            *slot = Some(waker.clone());
         }
         let ev = Event::new(key, src.read.is_some(), src.write.is_some());
         self.poller.modify(source, ev)
@@ -165,8 +169,8 @@ impl Reactor {
             Err(e) => return Err(e),
         }
 
-        let mut to_wake: Vec<Waker> = Vec::new();
-        let mut rearm: Vec<usize> = Vec::new();
+        let mut to_wake = std::mem::take(&mut self.wake_scratch);
+        let mut rearm = std::mem::take(&mut self.rearm_scratch);
         for ev in self.events.iter() {
             let Some(src) = self.sources.get_mut(ev.key) else {
                 continue;
@@ -183,7 +187,7 @@ impl Reactor {
                 rearm.push(ev.key);
             }
         }
-        for key in rearm {
+        for key in rearm.drain(..) {
             if let Some(src) = self.sources.get(key) {
                 if let Some(raw) = src.raw {
                     let ev = Event::new(key, src.read.is_some(), src.write.is_some());
@@ -202,9 +206,11 @@ impl Reactor {
         }
 
         let woken = to_wake.len();
-        for w in to_wake {
+        for w in to_wake.drain(..) {
             w.wake();
         }
+        self.wake_scratch = to_wake;
+        self.rearm_scratch = rearm;
         // Results handed back by blocking-pool threads.
         let finished = self.mailbox.drain();
         let blocking_woken = if finished.is_empty() {

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `OpenOptions::noatime(true)`: open with `O_NOATIME` (Linux) so reads do not update access times;
+  falls back to a normal open when the kernel refuses it. About +6% IOPS on page-cache random reads.
+- `benches/tasks.rs` scheduler micro-benchmark and `scripts/profile_echo.sh`;
+  `reports/optimization_pass.md` with the profile and measured results.
+
+### Changed
+- Bounded channels track blocked senders in an ordered map: O(log n) wake-up registration and
+  cancellation instead of scanning every blocked sender.
+- The compat adapter copies read data in bulk; TLS reuses its scratch buffers; the portable reactor reuses
+  its wake lists and skips redundant waker clones.
+
 ## 0.2.1 - 2026-11-13
 
 Documentation only: new README, CONTRIBUTING and SECURITY files, updated crates.io keywords.

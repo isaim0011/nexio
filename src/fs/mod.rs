@@ -208,6 +208,7 @@ pub struct OpenOptions {
     truncate: bool,
     create: bool,
     create_new: bool,
+    noatime: bool,
     mode: u32,
 }
 
@@ -227,6 +228,7 @@ impl OpenOptions {
             truncate: false,
             create: false,
             create_new: false,
+            noatime: false,
             mode: 0o666,
         }
     }
@@ -267,6 +269,16 @@ impl OpenOptions {
         self
     }
 
+    /// Do not update the file's access time on reads (`O_NOATIME`).
+    ///
+    /// Skips a metadata update on every read, which is measurable on page-cache-heavy
+    /// workloads. The kernel only allows it for the file's owner (or with `CAP_FOWNER`); when it
+    /// is refused, the file is opened normally instead.
+    pub fn noatime(&mut self, noatime: bool) -> &mut Self {
+        self.noatime = noatime;
+        self
+    }
+
     /// Set Unix permission mode bits for newly created files.
     pub fn mode(&mut self, mode: u32) -> &mut Self {
         self.mode = mode;
@@ -303,6 +315,18 @@ impl OpenOptions {
             flags |= libc::O_CREAT;
         }
 
+        if self.noatime {
+            let op = REACTOR.with(|r| {
+                r.borrow_mut()
+                    .openat(libc::AT_FDCWD, &cpath, flags | libc::O_NOATIME, self.mode)
+            })?;
+            match op.await {
+                Ok(fd) => return Ok(File { fd }),
+                // Not the owner: fall back to a normal open.
+                Err(e) if e.raw_os_error() == Some(libc::EPERM) => {}
+                Err(e) => return Err(e),
+            }
+        }
         let op = REACTOR.with(|r| {
             r.borrow_mut()
                 .openat(libc::AT_FDCWD, &cpath, flags, self.mode)

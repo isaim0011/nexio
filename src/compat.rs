@@ -141,8 +141,15 @@ impl<S: Duplex> Compat<S> {
             match &mut self.read {
                 ReadState::Buffered { buf, pos, len } => {
                     let n = dst.len().min(*len - *pos);
-                    for (d, s) in dst.iter_mut().zip(&buf[*pos..*pos + n]) {
-                        d.write(*s);
+                    // SAFETY: `n <= dst.len()` and `n <= len - pos <= buf.len() - pos`, so both ranges
+                    // are in bounds; `u8` and `MaybeUninit<u8>` have the same layout, and the buffers
+                    // are distinct allocations, so they cannot overlap.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            buf.as_ptr().add(*pos),
+                            dst.as_mut_ptr().cast::<u8>(),
+                            n,
+                        );
                     }
                     *pos += n;
                     if *pos == *len {
