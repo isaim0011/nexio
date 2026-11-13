@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 - 2026-11-13
 
 ### Added
 - `OpenOptions::noatime(true)`: open with `O_NOATIME` (Linux) so reads do not update access times;
