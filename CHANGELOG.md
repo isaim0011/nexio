@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `compat::Compat` reads adaptively: it starts at 16 KiB and doubles (up to 256 KiB) while reads keep
+  filling the buffer, shrinking back after a run of small reads, and accepts up to 256 KiB per write
+  (was 64 KiB). A consumer sitting on a stream of large messages (a WebSocket server receiving 8 KiB
+  publishes, say) now sees a burst in a few reads instead of many, so it handles the whole burst before it
+  next waits on the socket and can fan it out in one batch. Measured with Turbine's fan-out benchmark: TCP
+  segments per delivery at 8 KiB went from 1.02 to 0.57 and server CPU per delivery from 6.0 to 5.2 us;
+  small payloads are unchanged.
+
 ## 0.2.3 - 2026-11-13
 
 ### Fixed

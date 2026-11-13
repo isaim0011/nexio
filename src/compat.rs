@@ -31,9 +31,11 @@ use std::{
 };
 
 /// Bytes read from the stream per underlying read.
-const READ_CHUNK: usize = 16 * 1024;
+const MIN_READ: usize = 16 * 1024;
+/// Largest adaptive read size. A connection only gets here by repeatedly filling its buffer.
+const MAX_READ: usize = 256 * 1024;
 /// Most bytes accepted into the write buffer per `poll_write`.
-const WRITE_CHUNK: usize = 64 * 1024;
+const WRITE_CHUNK: usize = 256 * 1024;
 
 type BoxFut = Pin<Box<dyn Future<Output = (io::Result<usize>, Vec<u8>)>>>;
 type ShutdownFut = Pin<Box<dyn Future<Output = io::Result<()>>>>;
@@ -103,6 +105,9 @@ pub struct Compat<S: Duplex> {
     /// A write that finished (with an error) while it was being started; reported by the next call.
     write_err: Option<io::Error>,
     shutdown: ShutdownState,
+    /// Current read size: grows when reads keep filling the buffer, shrinks back when they stay small.
+    read_hint: usize,
+    small_reads: u8,
 }
 
 enum ShutdownState {
@@ -120,6 +125,8 @@ impl<S: Duplex> Compat<S> {
             write: WriteState::Idle(None),
             write_err: None,
             shutdown: ShutdownState::NotStarted,
+            read_hint: MIN_READ,
+            small_reads: 0,
         }
     }
 
@@ -161,7 +168,12 @@ impl<S: Duplex> Compat<S> {
                 ReadState::Idle(spare) => {
                     let mut buf = spare.take().unwrap_or_default();
                     buf.clear();
-                    buf.reserve(READ_CHUNK);
+                    let want = self.read_hint;
+                    if buf.capacity() > want * 2 {
+                        buf = Vec::with_capacity(want);
+                    } else {
+                        buf.reserve(want);
+                    }
                     self.read = ReadState::Pending(self.stream.clone().read_owned(buf));
                 }
                 ReadState::Pending(fut) => match fut.as_mut().poll(cx) {
@@ -171,7 +183,25 @@ impl<S: Duplex> Compat<S> {
                             self.read = ReadState::Idle(Some(buf));
                             return Poll::Ready(Ok(0));
                         }
-                        Ok(len) => self.read = ReadState::Buffered { buf, pos: 0, len },
+                        Ok(len) => {
+                            // A reader that keeps filling its buffer is handed a bigger one, so a
+                            // burst of large messages arrives in few reads instead of many. The
+                            // consumer then handles a whole burst before it next waits on the
+                            // socket, which is what lets a server fan it out in one batch.
+                            if len * 10 >= buf.capacity() * 9 {
+                                self.read_hint = (self.read_hint * 2).min(MAX_READ);
+                                self.small_reads = 0;
+                            } else if len * 8 < self.read_hint {
+                                self.small_reads += 1;
+                                if self.small_reads >= 32 {
+                                    self.read_hint = (self.read_hint / 2).max(MIN_READ);
+                                    self.small_reads = 0;
+                                }
+                            } else {
+                                self.small_reads = 0;
+                            }
+                            self.read = ReadState::Buffered { buf, pos: 0, len }
+                        }
                         Err(e) => {
                             self.read = ReadState::Idle(Some(buf));
                             return Poll::Ready(Err(e));
