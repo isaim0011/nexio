@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-nexio = { path = ".." }
+nexio = { path = "..", default-features = false }
 
 # Not part of the nexio package or any workspace.
 [workspace]

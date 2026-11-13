@@ -38,11 +38,11 @@ echo "TMPDIR: ${TMPDIR}"
 
 echo ""
 echo "=== [3/4] Running Miri on tests/slab_invariants.rs (pure-Rust slab layer) ==="
-cargo +nightly miri test --test slab_invariants
+cargo +nightly miri test --no-default-features --test slab_invariants
 
 echo ""
 echo "=== [4/4] Running Miri on pure-Rust tests in tests/cancel_on_drop.rs ==="
-cargo +nightly miri test --test cancel_on_drop slab_
+cargo +nightly miri test --no-default-features --test cancel_on_drop slab_
 
 echo ""
 echo "=== All Miri verification passes succeeded cleanly (0 UB, 0 memory corruption) ==="
