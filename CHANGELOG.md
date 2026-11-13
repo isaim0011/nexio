@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4 - 2026-11-13
 
 ### Changed
 - `compat::Compat` reads adaptively: it starts at 16 KiB and doubles (up to 256 KiB) while reads keep

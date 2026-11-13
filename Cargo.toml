@@ -1,6 +1,6 @@
 [package]
 name = "nexio"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors = ["isaim0011"]
 rust-version = "1.75"
