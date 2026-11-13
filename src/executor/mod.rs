@@ -8,6 +8,7 @@
 
 pub mod channel;
 pub mod join_set;
+pub(crate) mod remote;
 pub mod select;
 pub mod task;
 pub(crate) mod waker;
@@ -56,15 +57,23 @@ impl ExecutorInner {
         }
     }
 
+    /// Task id layout: generation (32 bits) | owning executor (10) | slot index (22).
     #[inline]
     fn pack_id(index: usize, generation: u32) -> TaskId {
-        TaskId(((generation as u64) << 32) | (index as u64))
+        assert!(
+            index < (1usize << remote::INDEX_BITS),
+            "too many live tasks on one thread"
+        );
+        let exec = remote::current() as u64;
+        TaskId(((generation as u64) << 32) | (exec << remote::INDEX_BITS) | (index as u64))
     }
 
     #[inline]
-    fn unpack_id(id: TaskId) -> (usize, u32) {
+    fn unpack_id(id: TaskId) -> (u32, usize, u32) {
         let raw = id.0;
-        ((raw & 0xFFFF_FFFF) as usize, (raw >> 32) as u32)
+        let index = (raw & ((1 << remote::INDEX_BITS) - 1)) as usize;
+        let exec = ((raw >> remote::INDEX_BITS) & ((1 << remote::EXEC_BITS) - 1)) as u32;
+        (exec, index, (raw >> 32) as u32)
     }
 
     fn insert_task(
@@ -113,7 +122,12 @@ thread_local! {
 }
 
 pub(crate) fn wake_task(id: TaskId) {
-    let (index, gen) = ExecutorInner::unpack_id(id);
+    let (exec, index, gen) = ExecutorInner::unpack_id(id);
+    if exec != remote::current() {
+        // A wake from another thread (a channel, a notifier): hand it to the owner.
+        remote::wake_remote(exec, id.0);
+        return;
+    }
     EXECUTOR.with(|exec| {
         let mut inner = exec.borrow_mut();
         let should_queue = if let Some(slot) = inner.tasks.get_mut(index) {
@@ -132,8 +146,23 @@ pub(crate) fn wake_task(id: TaskId) {
     });
 }
 
+/// Wake tasks (and possibly the root future) that other threads asked this thread to wake.
+/// Runs on the executor's own thread, from its reactor.
+pub(crate) fn deliver_remote_wakes(ids: Vec<u64>) {
+    for raw in ids {
+        if raw == remote::ROOT_WAKE {
+            waker::RootWaker::mark_woken();
+        } else {
+            wake_task(TaskId(raw));
+        }
+    }
+}
+
 pub(crate) fn cancel_task(id: TaskId) {
-    let (index, gen) = ExecutorInner::unpack_id(id);
+    let (exec, index, gen) = ExecutorInner::unpack_id(id);
+    if exec != remote::current() {
+        return;
+    }
     EXECUTOR.with(|exec| {
         let mut inner = exec.borrow_mut();
         if let Some(slot) = inner.tasks.get(index) {
@@ -248,6 +277,10 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
         running.set(true);
         SESSION.with(|s| s.set(s.get() + 1));
     });
+    // Other threads may wake our tasks: give this thread an executor id and publish its mailbox
+    // (the id must exist before the first task, including the mailbox's own helper, is spawned).
+    remote::ensure_id();
+    remote::register(&crate::blocking::current_mailbox());
 
     struct ResetGuard;
     impl Drop for ResetGuard {

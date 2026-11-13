@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Wakers called from another thread were lost.** A nexio task's `Waker` only worked on the thread
+  that ran it, so waking it from a `tokio::sync::mpsc` sender, a `oneshot`, a `Notify` or any other
+  channel on a different thread silently did nothing and the task hung (the same for the future passed
+  to `block_on`). Task ids now carry their executor's id, and a wake from a foreign thread is queued
+  in the owner's mailbox and wakes its reactor. Same-thread wakes keep the zero-atomic fast path
+  (spawn, yield and channel costs measured unchanged). New `tests/cross_thread_wake.rs` runs on every
+  backend and hangs without the fix.
+- Limits that follow: up to 1023 threads may run nexio executors at once, and up to ~4 million live
+  tasks per thread; both panic with a clear message instead of misbehaving.
+
 ## 0.2.2 - 2026-11-13
 
 ### Added

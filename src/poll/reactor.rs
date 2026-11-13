@@ -218,7 +218,10 @@ impl Reactor {
         } else {
             crate::blocking::deliver(finished)
         };
-        Ok(woken + blocking_woken)
+        let remote = self.mailbox.drain_wakes();
+        let remote_woken = remote.len();
+        crate::executor::deliver_remote_wakes(remote);
+        Ok(woken + blocking_woken + remote_woken)
     }
 }
 

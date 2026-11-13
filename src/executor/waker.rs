@@ -103,8 +103,16 @@ mod raw_root_waker {
         RawWaker::new(data, &VTABLE)
     }
 
-    unsafe fn wake_root(_data: *const ()) {
-        ROOT_WOKEN.with(|w| w.set(true));
+    /// The waker's data pointer encodes the executor id that owns the root future. A wake on
+    /// that thread sets the flag directly; from any other thread it is queued for the owner.
+    unsafe fn wake_root(data: *const ()) {
+        let base = NonNull::<u8>::dangling().as_ptr() as usize;
+        let exec = (data as usize).wrapping_sub(base) as u32;
+        if exec == crate::executor::remote::current() {
+            ROOT_WOKEN.with(|w| w.set(true));
+        } else {
+            crate::executor::remote::wake_remote(exec, crate::executor::remote::ROOT_WAKE);
+        }
     }
 
     unsafe fn drop_root(_data: *const ()) {}
@@ -115,9 +123,10 @@ mod raw_root_waker {
     #[inline]
     pub(super) fn into_waker() -> Waker {
         // SAFETY: VTABLE functions uphold RawWaker contract and never dereference `data`.
+        let exec = crate::executor::remote::current() as usize;
         unsafe {
             Waker::from_raw(RawWaker::new(
-                NonNull::<u8>::dangling().as_ptr().cast(),
+                NonNull::<u8>::dangling().as_ptr().wrapping_add(exec).cast(),
                 &VTABLE,
             ))
         }
@@ -133,6 +142,12 @@ impl RootWaker {
     #[inline]
     pub(crate) fn is_woken() -> bool {
         ROOT_WOKEN.with(|w| w.get())
+    }
+
+    /// Mark the root future woken. Called by the owning thread when it drains remote wakes.
+    #[inline]
+    pub(crate) fn mark_woken() {
+        ROOT_WOKEN.with(|w| w.set(true));
     }
 
     #[inline]

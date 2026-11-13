@@ -38,6 +38,8 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Where pool threads deposit finished job ids for one reactor thread.
 pub(crate) struct Mailbox {
     done: Mutex<Vec<u64>>,
+    /// Tasks (or the root future) that other threads asked to wake; see `executor::remote`.
+    wakes: Mutex<Vec<u64>>,
     notify: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -45,6 +47,7 @@ impl Mailbox {
     pub(crate) fn new(notify: Box<dyn Fn() + Send + Sync>) -> Self {
         Self {
             done: Mutex::new(Vec::new()),
+            wakes: Mutex::new(Vec::new()),
             notify,
         }
     }
@@ -52,6 +55,24 @@ impl Mailbox {
     pub(crate) fn complete(&self, id: u64) {
         self.done.lock().unwrap_or_else(|e| e.into_inner()).push(id);
         (self.notify)();
+    }
+
+    /// Ask this mailbox's thread to wake a task. Pokes the reactor only when the queue was
+    /// empty: otherwise an earlier poke is still pending and the drain will see this entry too.
+    pub(crate) fn post_wake(&self, raw: u64) {
+        let was_empty = {
+            let mut w = self.wakes.lock().unwrap_or_else(|e| e.into_inner());
+            let was_empty = w.is_empty();
+            w.push(raw);
+            was_empty
+        };
+        if was_empty {
+            (self.notify)();
+        }
+    }
+
+    pub(crate) fn drain_wakes(&self) -> Vec<u64> {
+        std::mem::take(&mut *self.wakes.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub(crate) fn drain(&self) -> Vec<u64> {
@@ -191,6 +212,7 @@ fn spawn_uring_reader(reader: &std::os::fd::OwnedFd, mailbox: Arc<Mailbox>) {
                 break;
             }
             deliver(mailbox.drain());
+            crate::executor::deliver_remote_wakes(mailbox.drain_wakes());
         }
     }));
 }
