@@ -1,4 +1,4 @@
-//! HTTP/1.1 client and server connections, built on [`hyper`] over nexio streams.
+//! HTTP/1.1 and HTTP/2 client and server connections, built on [`hyper`] over nexio streams.
 //!
 //! nexio contains no HTTP parser of its own: hyper does the protocol work, and this
 //! module connects it to nexio's sockets (through [`Compat`]),
@@ -7,21 +7,17 @@
 //! [`TlsStream`](crate::tls::TlsStream) for HTTPS (with the `tls` feature).
 //!
 //! ```ignore
-//! // Server: one task per connection.
-//! let stream = listener.accept().await?;
-//! nexio::spawn(async move {
-//!     let _ = nexio::http::serve_connection(stream, service_fn(|req| async {
+//! // High-level server:
+//! nexio::http::Server::bind(("127.0.0.1", 8080)).await?.serve(|_stream| {
+//!     hyper::service::service_fn(|_req| async {
 //!         Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from("hi"))))
-//!     })).await;
-//! });
+//!     })
+//! }).await?;
 //!
-//! // Client.
+//! // Client:
 //! let mut client = nexio::http::connect(TcpStream::connect(addr).await?).await?;
 //! let resp = client.send(Request::get("/").header("host", "x").body(Empty::<Bytes>::new())?).await?;
 //! ```
-//!
-//! Only HTTP/1.1 is provided. Futures here are not `Send`, like everything in nexio, which
-//! rules out hyper's HTTP/2 (it requires `Send` tasks).
 
 use std::{error::Error as StdError, future::Future, io, net::SocketAddr};
 
@@ -44,8 +40,9 @@ use crate::{
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
-#[derive(Clone, Copy)]
-struct LocalExec;
+/// Single-threaded [`hyper::rt::Executor`] that spawns tasks onto the current nexio shard.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LocalExec;
 
 impl<F> hyper::rt::Executor<F> for LocalExec
 where

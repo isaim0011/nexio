@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "nexio": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "--example", "mcp_server"]
+    }
+  }
+}

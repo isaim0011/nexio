@@ -120,6 +120,10 @@ async fn time_sleep_reset_timeout_at_and_interval() {
         Instant::now() + Duration::from_millis(2),
         Duration::from_millis(4),
     );
+    iv.set_missed_tick_behavior(MissedTickBehavior::Burst);
+    assert_eq!(iv.missed_tick_behavior(), MissedTickBehavior::Burst);
+    iv.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    assert_eq!(iv.missed_tick_behavior(), MissedTickBehavior::Skip);
     iv.set_missed_tick_behavior(MissedTickBehavior::Delay);
     assert_eq!(iv.missed_tick_behavior(), MissedTickBehavior::Delay);
     iv.tick().await;
@@ -129,14 +133,17 @@ async fn time_sleep_reset_timeout_at_and_interval() {
 async fn fs_helpers_and_vectored_file_io() {
     let base = std::env::temp_dir().join(format!("nexio_fs_ops_{}", std::process::id()));
     let _ = fs::remove_dir_all(&base).await;
+    fs::create_dir(&base).await.unwrap();
     fs::create_dir_all(base.join("sub")).await.unwrap();
 
     let p1 = base.join("a.txt");
     let p2 = base.join("sub/b.txt");
     fs::write(&p1, b"hello world!").await.unwrap();
     assert_eq!(fs::read(&p1).await.unwrap(), b"hello world!");
-    assert_eq!(fs::metadata(&p1).await.unwrap().len(), 12);
+    let meta = fs::metadata(&p1).await.unwrap();
+    assert_eq!(meta.len(), 12);
     assert_eq!(fs::symlink_metadata(&p1).await.unwrap().len(), 12);
+    fs::set_permissions(&p1, meta.permissions()).await.unwrap();
 
     fs::copy(&p1, &p2).await.unwrap();
     let p3 = base.join("sub/c.txt");
@@ -159,7 +166,9 @@ async fn fs_helpers_and_vectored_file_io() {
     f.sync_data().await.unwrap();
     assert_eq!(f.metadata().await.unwrap().len(), 8);
     f.set_len(6).await.unwrap();
-    assert_eq!(f.metadata().await.unwrap().len(), 6);
+    let fmeta = f.metadata().await.unwrap();
+    assert_eq!(fmeta.len(), 6);
+    f.set_permissions(fmeta.permissions()).await.unwrap();
     f.close().await.unwrap();
 
     let f = File::open(&vpath).await.unwrap();

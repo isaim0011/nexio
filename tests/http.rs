@@ -187,3 +187,95 @@ fn https_end_to_end() {
         server.await.unwrap();
     });
 }
+
+#[test]
+fn server_bind_and_serve_with_shutdown() {
+    block_on(async {
+        let server = http::Server::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = server.local_addr().unwrap();
+        let (tx, rx) = nexio::sync::oneshot::channel::<()>();
+
+        let srv_task = spawn(async move {
+            server
+                .serve_with_shutdown(
+                    |_stream| {
+                        service_fn(|_req: Request<hyper::body::Incoming>| async {
+                            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from("server-ok"))))
+                        })
+                    },
+                    async move {
+                        let _ = rx.await;
+                    },
+                )
+                .await
+                .unwrap();
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
+        let mut client = http::connect::<_, Empty<Bytes>>(tcp).await.unwrap();
+        let req = Request::get("/")
+            .header("host", "localhost")
+            .body(Empty::new())
+            .unwrap();
+        let resp = client.send(req).await.unwrap();
+        assert_eq!(
+            resp.into_body().collect().await.unwrap().to_bytes(),
+            "server-ok"
+        );
+        drop(client);
+        let _ = tx.send(());
+        srv_task.await.unwrap();
+    });
+}
+
+#[test]
+fn http2_end_to_end() {
+    block_on(async {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = spawn(async move {
+            let tcp = listener.accept().await.unwrap();
+            tcp.set_nodelay(true).unwrap();
+            let _ = http::serve_http2_connection(
+                tcp,
+                service_fn(|req: Request<hyper::body::Incoming>| async move {
+                    let path = req.uri().path().to_owned();
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(format!("h2:{path}")))))
+                }),
+            )
+            .await;
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        tcp.set_nodelay(true).unwrap();
+        let (mut sender, conn) =
+            hyper::client::conn::http2::handshake(http::LocalExec, nexio::compat::Compat::new(tcp))
+                .await
+                .unwrap();
+        drop(spawn(async move {
+            let _ = conn.await;
+        }));
+
+        let r1 = sender
+            .send_request(Request::get("/alpha").body(Empty::<Bytes>::new()).unwrap())
+            .await
+            .unwrap();
+        let r2 = sender
+            .send_request(Request::get("/beta").body(Empty::<Bytes>::new()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            r1.into_body().collect().await.unwrap().to_bytes(),
+            "h2:/alpha"
+        );
+        assert_eq!(
+            r2.into_body().collect().await.unwrap().to_bytes(),
+            "h2:/beta"
+        );
+        drop(sender);
+        server.await.unwrap();
+    });
+}

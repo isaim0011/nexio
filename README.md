@@ -211,6 +211,19 @@ bash scripts/ci_miri.sh                       # needs nightly and Miri
 bash bench/split.sh                           # pinned server/client echo benchmark
 ```
 
+## MCP server for AI agents
+
+The repository includes a zero-dependency stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
+server in [`examples/mcp_server.rs`](examples/mcp_server.rs) and a root [`.mcp.json`](.mcp.json) config for coding
+agents:
+
+```bash
+cargo run --quiet --example mcp_server
+```
+
+It exposes `nexio_runtime_info` (backend, `io_uring_available()`, `ReactorStats`), `nexio_api_reference`, and
+`nexio_check_workspace`.
+
 ## Contributing
 
 Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: see
