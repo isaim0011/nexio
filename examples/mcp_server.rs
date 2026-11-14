@@ -5,10 +5,13 @@
 //! cargo run --quiet --example mcp_server
 //! ```
 //!
-//! Exposes three read-only tools over JSON-RPC 2.0 (line-delimited stdin/stdout):
+//! Exposes four read-only tools over JSON-RPC 2.0 (line-delimited stdin/stdout):
 //! - `nexio_runtime_info`: active backend, `io_uring_available()`, OS/arch, and `ReactorStats`.
-//! - `nexio_api_reference`: concise API & snippet reference for a topic (`macros`, `net`, `fs`,
-//!   `sync`, `time`, `http`, `tls`, `multishot`, `fallback`, or `all`).
+//! - `nexio_platform_matrix`: full Linux (`io_uring` / `epoll` / `runtime-fallback`), Windows (`IOCP`),
+//!   macOS (`kqueue`), and Unix capability matrix.
+//! - `nexio_api_reference`: concise API & snippet reference for every nexio module (`runtime`,
+//!   `macros`, `net`, `unix`, `fs`, `sync`, `time`, `process`, `signal`, `dns`, `http`, `tls`,
+//!   `compat`, `multishot`, `fallback`, `platforms`, or `all`).
 //! - `nexio_check_workspace`: inspects a `Cargo.toml` for `nexio` features and migration notes.
 
 use std::{
@@ -58,6 +61,11 @@ fn handle_jsonrpc(msg: &str) -> Option<String> {
             let name = extract_nested_string(msg, "params", "name").unwrap_or_default();
             match name.as_str() {
                 "nexio_runtime_info" => Ok(tool_text_result(&runtime_info_text())),
+                "nexio_platform_matrix" => {
+                    let target =
+                        extract_string_field(msg, "platform").unwrap_or_else(|| "all".into());
+                    Ok(tool_text_result(&platform_matrix_text(&target)))
+                }
                 "nexio_api_reference" => {
                     let topic = extract_string_field(msg, "topic").unwrap_or_else(|| "all".into());
                     Ok(tool_text_result(&api_reference_text(&topic)))
@@ -86,7 +94,8 @@ fn tools_list_json() -> &'static str {
     concat!(
         r#"{"tools":["#,
         r#"{"name":"nexio_runtime_info","description":"Return nexio version, OS/arch, io_uring_available(), active backend name, and ReactorStats.","inputSchema":{"type":"object","properties":{},"additionalProperties":false}},"#,
-        r#"{"name":"nexio_api_reference","description":"Return concise nexio API usage and feature flags for a topic.","inputSchema":{"type":"object","properties":{"topic":{"type":"string","description":"Topic: macros, net, fs, sync, time, http, tls, multishot, fallback, or all"}},"additionalProperties":false}},"#,
+        r#"{"name":"nexio_platform_matrix","description":"Return nexio backend and feature support matrix for Linux (io_uring/epoll/runtime-fallback), Windows (IOCP), macOS (kqueue), or all.","inputSchema":{"type":"object","properties":{"platform":{"type":"string","description":"Platform filter: linux, windows, macos, unix, or all"}},"additionalProperties":false}},"#,
+        r#"{"name":"nexio_api_reference","description":"Return concise nexio API usage and feature flags for any module or topic.","inputSchema":{"type":"object","properties":{"topic":{"type":"string","description":"Topic: runtime, macros, net, unix, fs, sync, time, process, signal, dns, http, tls, compat, multishot, fallback, platforms, or all"}},"additionalProperties":false}},"#,
         r#"{"name":"nexio_check_workspace","description":"Inspect a Cargo.toml manifest for nexio dependencies, features, and upgrade notes.","inputSchema":{"type":"object","properties":{"manifest_path":{"type":"string","description":"Path to Cargo.toml (defaults to Cargo.toml)"}},"additionalProperties":false}}"#,
         r#"]}"#
     )
@@ -114,8 +123,55 @@ fn runtime_info_text() -> String {
     )
 }
 
+fn platform_matrix_text(platform: &str) -> String {
+    match platform.trim().to_ascii_lowercase().as_str() {
+        "linux" => concat!(
+            "Linux:\n",
+            "  - Default backend: io_uring (kernel 5.10+, DEFER_TASKRUN/COOP_TASKRUN optional via feature `coop-taskrun`).\n",
+            "  - Portable override: `--features poll` forces epoll via `polling`.\n",
+            "  - Runtime fallback: `--features runtime-fallback` probes `io_uring_available()` and falls back to epoll on EPERM/ENOSYS/EACCES.\n",
+            "  - Exclusive on io_uring: `ProvidedBufRing`, `TcpListener::accept_multishot`, `TcpStream::recv_multishot`, native async file I/O.\n",
+            "  - All other APIs (TCP/UDP, Unix sockets, timers, sync, fs helpers, process, signal, DNS, TLS, HTTP/1.1+HTTP/2, tokio-compat, run_sharded): supported."
+        )
+        .to_string(),
+        "windows" => concat!(
+            "Windows:\n",
+            "  - Backend: IOCP via `polling` (`poll` backend).\n",
+            "  - Supported: TCP (`split`/`into_split`/vectored), UDP, timers, sync, fs (blocking pool), process, `ctrl_c`, DNS, TLS, HTTP/1.1+HTTP/2, `tokio-compat`, `#[nexio::main]`/`#[nexio::test]`.\n",
+            "  - Not available on Windows: Unix domain sockets (`cfg(unix)`), Unix `signal()`, Linux `io_uring` multishot/`ProvidedBufRing`, `SO_REUSEPORT` sharding."
+        )
+        .to_string(),
+        "macos" | "darwin" => concat!(
+            "macOS:\n",
+            "  - Backend: kqueue via `polling` (`poll` backend).\n",
+            "  - Supported: TCP (`split`/`into_split`/vectored), UDP, Unix domain sockets (`UnixStream::into_split`, `UnixDatagram`), timers, sync, fs (blocking pool), process, `ctrl_c` & Unix `signal()`, DNS, TLS, HTTP/1.1+HTTP/2, `tokio-compat`, `run_sharded` (`SO_REUSEPORT`), `#[nexio::main]`/`#[nexio::test]`.\n",
+            "  - Not available on macOS: Linux `io_uring` multishot/`ProvidedBufRing`."
+        )
+        .to_string(),
+        "unix" => concat!(
+            "Other Unix (FreeBSD, OpenBSD, NetBSD, etc.):\n",
+            "  - Backend: kqueue / epoll / event ports via `polling`.\n",
+            "  - Same portable + Unix feature set as macOS (Unix sockets, Unix signals, `SO_REUSEPORT` sharding)."
+        )
+        .to_string(),
+        _ => [
+            platform_matrix_text("linux"),
+            platform_matrix_text("windows"),
+            platform_matrix_text("macos"),
+            platform_matrix_text("unix"),
+        ]
+        .join("\n\n"),
+    }
+}
+
 fn api_reference_text(topic: &str) -> String {
     match topic.trim().to_ascii_lowercase().as_str() {
+        "runtime" => concat!(
+            "nexio runtime core:\n",
+            "  - `block_on`, `spawn`, `JoinSet`, `join2`, `select2`, `run_sharded`, `spawn_blocking`\n",
+            "  - `Reactor::new()`, `Reactor::backend_name()`, `Reactor::stats()`, `nexio::reactor::current_stats()` (`ReactorStats`)"
+        )
+        .to_string(),
         "macros" => concat!(
             "#[nexio::main] and #[nexio::test] (feature `macros`, enabled by default):\n",
             "  #[nexio::main]\n",
@@ -128,6 +184,11 @@ fn api_reference_text(topic: &str) -> String {
             "  - Owned buffers: let (res, buf) = stream.read(buf).await;\n",
             "  - Split halves: let (rd, wr) = stream.into_split(); rd.reunite(wr)?;\n",
             "  - Vectored I/O: read_vectored / write_vectored / write_all_vectored\n"
+        )
+        .to_string(),
+        "unix" => concat!(
+            "nexio::net::{UnixListener, UnixStream, UnixDatagram} (Unix only, `cfg(unix)`):\n",
+            "  - Supports `split()`, `into_split()`, `reunite()`, and `UnixDatagram` send/recv.\n"
         )
         .to_string(),
         "fs" => concat!(
@@ -147,6 +208,22 @@ fn api_reference_text(topic: &str) -> String {
             "  - MissedTickBehavior::{Burst, Delay, Skip}\n"
         )
         .to_string(),
+        "process" => concat!(
+            "nexio::process::Command:\n",
+            "  - Async child spawning with piped stdin/stdout/stderr and `wait()` / `output()`.\n"
+        )
+        .to_string(),
+        "signal" => concat!(
+            "nexio::signal:\n",
+            "  - Cross-platform `ctrl_c().await`\n",
+            "  - Unix `nexio::signal::unix::signal(SignalKind)` (`cfg(unix)`)\n"
+        )
+        .to_string(),
+        "dns" => concat!(
+            "Async DNS:\n",
+            "  - `nexio::net::lookup_host(host_port).await` and `ToAddrs` on `TcpStream::connect` / `TcpListener::bind`.\n"
+        )
+        .to_string(),
         "http" => concat!(
             "nexio::http (feature `http`): HTTP/1.1 & HTTP/2 over hyper:\n",
             "  - High-level: Server::bind(addr).await?.serve(|_stream| service_fn(...)).await?;\n",
@@ -157,6 +234,11 @@ fn api_reference_text(topic: &str) -> String {
             "nexio::tls (feature `tls`): rustls TlsAcceptor / TlsConnector wrapping TcpStream.\n"
                 .to_string()
         }
+        "compat" => concat!(
+            "nexio::compat::Compat (feature `tokio-compat` or `http`):\n",
+            "  - Adapts `TcpStream`, `UnixStream`, `TlsStream`, and split halves to tokio `AsyncRead`/`AsyncWrite` without a tokio runtime.\n"
+        )
+        .to_string(),
         "multishot" => concat!(
             "Linux io_uring multishot & provided buffer rings:\n",
             "  - Reactor::register_buf_ring / ProvidedBufRing (IORING_REGISTER_PBUF_RING)\n",
@@ -169,13 +251,21 @@ fn api_reference_text(topic: &str) -> String {
             "  - Feature `runtime-fallback` compiles both io_uring and epoll, falling back automatically on EPERM/ENOSYS/EACCES.\n"
         )
         .to_string(),
+        "platforms" => platform_matrix_text("all"),
         _ => [
+            api_reference_text("runtime"),
             api_reference_text("macros"),
             api_reference_text("net"),
+            api_reference_text("unix"),
             api_reference_text("fs"),
             api_reference_text("sync"),
             api_reference_text("time"),
+            api_reference_text("process"),
+            api_reference_text("signal"),
+            api_reference_text("dns"),
             api_reference_text("http"),
+            api_reference_text("tls"),
+            api_reference_text("compat"),
             api_reference_text("multishot"),
             api_reference_text("fallback"),
         ]

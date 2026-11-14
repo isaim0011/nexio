@@ -221,8 +221,9 @@ agents:
 cargo run --quiet --example mcp_server
 ```
 
-It exposes `nexio_runtime_info` (backend, `io_uring_available()`, `ReactorStats`), `nexio_api_reference`, and
-`nexio_check_workspace`.
+It exposes `nexio_runtime_info` (backend, `io_uring_available()`, `ReactorStats`), `nexio_platform_matrix`
+(Linux `io_uring`/`epoll`/`runtime-fallback`, Windows `IOCP`, macOS `kqueue`, Unix), `nexio_api_reference`
+(every module), and `nexio_check_workspace`.
 
 ## Contributing
 
